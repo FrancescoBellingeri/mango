@@ -1,0 +1,104 @@
+[build-system]
+requires = ["flit_core >=3.2,<4"]
+build-backend = "flit_core.buildapi"
+
+[project]
+name = "mango-ai"
+version = "0.1.0"
+authors = [
+  { name="Francesco Bellingeri", email="francescobellingeri01@gmail.com" },
+]
+
+description = "Generate NoSQL queries from natural language"
+readme = "README.md"
+requires-python = ">=3.12"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "pandas==3.0.2",
+    "pymongo==4.16.0",
+    "rich==14.3.3",
+    "chromadb==1.5.6",
+    "fastapi==0.135.3",
+]
+
+[project.scripts]
+mango = "mango.servers.cli.main:main"
+
+[project.urls]
+"Homepage" = "https://github.com/FrancescoBellingeri/mango-ai"
+
+[project.optional-dependencies]
+anthropic = ["anthropic==0.89.0"]
+openai = ["openai==2.30.0"]
+gemini = ["google-genai==1.70.0"]
+all = ["anthropic==0.89.0", "openai==2.30.0", "google-genai==1.70.0"]
+test = ["pytest>=7.0.0", "pytest-asyncio>=0.23.0", "pytest-mock>=3.10.0", "pytest-cov>=4.0.0", "mongomock>=4.1.0"]
+dev = ["pytest>=7.0.0", "pytest-asyncio>=0.23.0", "pytest-mock>=3.10.0", "pytest-cov>=4.0.0", "mongomock>=4.1.0", "mypy", "ruff"]
+
+[tool.flit.module]
+name = "mango"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+asyncio_mode = "auto"
+markers = [
+    "integration: marks tests as integration tests (deselect with '-m \"not integration\"')",
+    "anthropic: marks tests requiring Anthropic API key",
+    "openai: marks tests requiring OpenAI API key",
+    "slow: marks tests as slow running",
+    "mongodb: marks tests requiring a MongoDB instance",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+fix = false
+exclude = [
+    ".git",
+    ".venv",
+    "venv",
+    "__pycache__",
+    "build",
+    "dist",
+    "*.egg-info",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "N",   # pep8-naming
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "SIM", # flake8-simplify
+]
+ignore = [
+    "E501", "E402", "E731", "E741",
+    "W291", "W293",
+    "N801", "N802", "N803", "N805", "N806", "N818", "N999",
+    "F401", "F541", "F811", "F841",
+    "B006", "B007", "B008", "B024", "B027", "B904", "B905",
+    "C408", "C416",
+    "SIM102", "SIM103", "SIM105", "SIM108", "SIM110",
+    "SIM114", "SIM117", "SIM118", "SIM401", "SIM910",
+]
+fixable = ["ALL"]
+unfixable = []
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"

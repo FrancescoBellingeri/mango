@@ -1,0 +1,8 @@
+venv/
+.env
+__pycache__
+.mango_memory
+chroma_db/
+.pytest_cache/
+.venv/
+dist/
