@@ -7,6 +7,7 @@ The agent always talks to an LLMService — never to a provider SDK directly.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from mango.llm.models import Message, ToolDef, LLMResponse
 
 
 # ---------------------------------------------------------------------------

@@ -109,10 +109,6 @@ class ToolRegistry:
             raise ValueError(f"Tool '{name}' is already registered.")
         self._tools[name] = tool
 
-    def register_local_tool(self, tool: Tool) -> None:
-        """Alias for register(). Provided for API consistency."""
-        self.register(tool)
-
     def get_definitions(self) -> list[ToolDef]:
         """Return ToolDef list to pass to LLMService.chat()."""
         return [t.definition for t in self._tools.values()]

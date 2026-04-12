@@ -13,6 +13,7 @@ from mango.tools import (
 )
 from mango.servers.fastapi import MangoFastAPIServer
 from mango.integrations.google import GeminiLlmService
+from mango.integrations.anthropic import AnthropicLlmService
 from mango.integrations.mongodb import MongoRunner
 from mango.integrations.chromadb import ChromaAgentMemory
 from dotenv import load_dotenv
@@ -20,7 +21,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Configure your LLM
-llm = GeminiLlmService(
+llm = AnthropicLlmService(
     model="gemini-3.1-pro-preview",
     api_key=os.getenv("GEMINI_API_KEY"),
 )
@@ -37,13 +38,13 @@ agent_memory = ChromaAgentMemory(
 
 # Register tools
 tools = ToolRegistry()
-tools.register_local_tool(ListCollectionsTool(db))
-tools.register_local_tool(SearchCollectionsTool(db))
-tools.register_local_tool(DescribeCollectionTool(db))
-tools.register_local_tool(CollectionStatsTool(db))
-tools.register_local_tool(RunMQLTool(db))
-tools.register_local_tool(SearchSavedCorrectToolUsesTool(agent_memory))
-tools.register_local_tool(SaveTextMemoryTool(agent_memory))
+tools.register(ListCollectionsTool(db))
+tools.register(SearchCollectionsTool(db))
+tools.register(DescribeCollectionTool(db))
+tools.register(CollectionStatsTool(db))
+tools.register(RunMQLTool(db))
+tools.register(SearchSavedCorrectToolUsesTool(agent_memory))
+tools.register(SaveTextMemoryTool(agent_memory))
 
 # Create your agent
 agent = MangoAgent(
