@@ -1,8 +1,14 @@
 """Memory models for Mango.
 """
 
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
+
+
+def make_entry_id() -> str:
+    """Generate a unique ID for a new MemoryEntry."""
+    return str(uuid.uuid4())
 
 
 @dataclass

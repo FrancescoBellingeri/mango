@@ -23,8 +23,7 @@ from mango.agent.prompt_builder import build_system_prompt
 from mango.nosql_runner import NoSQLRunner
 from mango.core.types import SchemaInfo
 from mango.llm import LLMService, Message
-from mango.memory import MemoryEntry, MemoryService
-from mango.integrations.chromadb import make_entry_id
+from mango.memory import MemoryEntry, MemoryService, make_entry_id
 from mango.tools import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -46,7 +45,7 @@ class AgentResponse:
     input_tokens: int = 0
     output_tokens: int = 0
     iterations: int = 0
-    memory_hits: int = 0        # number of memory examples injected
+    memory_hits: int = 0
 
 
 class MangoAgent:
@@ -64,6 +63,7 @@ class MangoAgent:
         introspect: Whether to introspect schema at setup() time.
         max_iterations: Safety cap on tool-call iterations per question.
         memory_top_k: Number of memory examples to retrieve per question.
+        max_turns: Number of conversation turns to keep in history.
     """
 
     def __init__(
@@ -73,7 +73,7 @@ class MangoAgent:
         db: NoSQLRunner | None = None,
         agent_memory: MemoryService | None = None,
         schema: dict[str, SchemaInfo] | None = None,
-        introspect: bool = True,
+        introspect: bool = False,
         max_iterations: int = 8,
         memory_top_k: int = 3,
         max_turns: int = 5,
@@ -89,29 +89,26 @@ class MangoAgent:
         self._max_turns = max_turns
         self._system_prompt: str = ""
         self._conversation: list[Message] = []
+        self._ready: bool = False
 
     # ------------------------------------------------------------------
-    # Properties (expose internals cleanly for the server layer)
+    # Properties
     # ------------------------------------------------------------------
 
     @property
     def llm_service(self) -> LLMService:
-        """The configured LLM service."""
         return self._llm
 
     @property
     def tool_registry(self) -> ToolRegistry:
-        """The tool registry."""
         return self._registry
 
     @property
     def db(self) -> NoSQLRunner | None:
-        """The connected database db (may be None)."""
         return self._db
 
     @property
     def agent_memory(self) -> MemoryService | None:
-        """The memory service (may be None)."""
         return self._memory
 
     # ------------------------------------------------------------------
@@ -126,6 +123,7 @@ class MangoAgent:
         """
         if self._db is None:
             logger.info("No db configured — skipping schema introspection.")
+            self._ready = True
             return
 
         db_name = getattr(
@@ -141,6 +139,7 @@ class MangoAgent:
             db_name=db_name,
             schema=self._schema,
         )
+        self._ready = True
         logger.info("Agent ready. Model: %s", self._llm.get_model_name())
 
     def new_session(self) -> MangoAgent:
@@ -155,12 +154,13 @@ class MangoAgent:
             db=self._db,
             agent_memory=self._memory,
             schema=self._schema,
-            introspect=False,   # schema already available
+            introspect=False,
             max_iterations=self._max_iterations,
             memory_top_k=self._memory_top_k,
+            max_turns=self._max_turns,
         )
-        # Share the already-built system prompt.
         agent._system_prompt = self._system_prompt
+        agent._ready = self._ready
         return agent
 
     async def ask(
@@ -181,107 +181,28 @@ class MangoAgent:
         Returns:
             AgentResponse with the answer and metadata.
         """
-        if not self._system_prompt:
-            self.setup()
+        memory_hits, system_prompt = await self._prepare_turn(question)
 
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S UTC")
-        system_prompt = f"Current datetime: {now}\n\n{self._system_prompt}"
-        self._conversation.append(Message(role="user", content=question))
-
-        tool_calls_made: list[str] = []
-        total_input_tokens = 0
-        total_output_tokens = 0
-        iterations = 0
-
-        while iterations < self._max_iterations:
-            iterations += 1
-
-            response = self._llm.chat(
-                messages=self._conversation,
-                tools=self._registry.get_definitions(),
-                system_prompt=system_prompt,
-            )
-
-            total_input_tokens += response.input_tokens
-            total_output_tokens += response.output_tokens
-
-            # If the LLM returned text with no tool calls, we're done.
-            if not response.has_tool_calls:
-                answer = response.text or ""
-                self._conversation.append(
-                    Message(role="assistant", content=answer)
+        async for event in self._run_loop(question, system_prompt, memory_hits):
+            if event["type"] == "tool_result" and on_tool_call:
+                on_tool_call(
+                    event["tool_name"],
+                    event["tool_args"],
+                    event["result_text"],
                 )
+            if event["type"] == "answer":
                 self._prune_conversation()
                 return AgentResponse(
-                    answer=answer,
-                    tool_calls_made=tool_calls_made,
-                    input_tokens=total_input_tokens,
-                    output_tokens=total_output_tokens,
-                    iterations=iterations,
-                    memory_hits=0,
+                    answer=event["text"],
+                    tool_calls_made=event["tool_calls_made"],
+                    input_tokens=event["input_tokens"],
+                    output_tokens=event["output_tokens"],
+                    iterations=event["iterations"],
+                    memory_hits=event["memory_hits"],
                 )
 
-            # Record the assistant turn (may include both text and tool calls).
-            assistant_content: list[dict] = []
-            if response.text:
-                assistant_content.append({"type": "text", "text": response.text})
-            for tc in response.tool_calls:
-                block: dict = {
-                    "type": "tool_use",
-                    "id": tc.tool_call_id,
-                    "name": tc.tool_name,
-                    "input": tc.tool_args,
-                }
-                # Preserve Gemini 3 thought_signature so it can be round-tripped
-                # back on subsequent turns (required to avoid 400 errors).
-                if tc.thought_signature is not None:
-                    block["thought_signature"] = tc.thought_signature
-                assistant_content.append(block)
-            self._conversation.append(
-                Message(role="assistant", content=assistant_content)
-            )
-
-            # Execute each tool call and append results.
-            for tc in response.tool_calls:
-                tool_calls_made.append(tc.tool_name)
-                logger.info("Tool call: %s(%s)", tc.tool_name, tc.tool_args)
-
-                result = await self._registry.execute(tc.tool_name, **tc.tool_args)
-                result_text = result.as_text()
-
-                logger.debug("Tool result (%s): %.200s…", tc.tool_name, result_text)
-
-                if result.success and tc.tool_name not in _MEMORY_TOOL_NAMES:
-                    await self._auto_store_memory(question, tc.tool_name, tc.tool_args, result_text)
-
-                if on_tool_call:
-                    on_tool_call(tc.tool_name, tc.tool_args, result_text)
-
-                self._conversation.append(
-                    Message(
-                        role="tool",
-                        content=result_text,
-                        tool_call_id=tc.tool_call_id,
-                    )
-                )
-
-        # Safety cap reached — ask LLM for a final answer with what it has.
-        logger.warning("Max iterations (%d) reached.", self._max_iterations)
-        response = self._llm.chat(
-            messages=self._conversation,
-            tools=[],
-            system_prompt=system_prompt,
-        )
-        answer = response.text or "I reached the maximum number of steps. Please try rephrasing your question."
-        self._conversation.append(Message(role="assistant", content=answer))
-        return AgentResponse(
-            answer=answer,
-            tool_calls_made=tool_calls_made,
-            input_tokens=total_input_tokens + response.input_tokens,
-            output_tokens=total_output_tokens + response.output_tokens,
-            iterations=iterations,
-            memory_hits=0,
-        )
+        # Should never reach here — _run_loop always yields an answer event.
+        return AgentResponse(answer="")
 
     async def ask_stream(
         self,
@@ -298,13 +219,91 @@ class MangoAgent:
                "output_tokens": int, "memory_hits": int, "tool_calls_made": list[str]}``
         - ``{"type": "error", "message": str}``
         """
-        if not self._system_prompt:
+        memory_hits, system_prompt = await self._prepare_turn(question)
+
+        async for event in self._run_loop(question, system_prompt, memory_hits):
+            if event["type"] == "tool_call":
+                yield {"type": "tool_call", "tool_name": event["tool_name"], "tool_args": event["tool_args"]}
+            elif event["type"] == "tool_result":
+                preview = event["result_text"]
+                if len(preview) > 200:
+                    preview = preview[:200] + "…"
+                yield {
+                    "type": "tool_result",
+                    "tool_name": event["tool_name"],
+                    "success": event["success"],
+                    "preview": preview,
+                }
+            elif event["type"] == "answer":
+                self._prune_conversation()
+                yield {"type": "answer", "text": event["text"]}
+                yield {
+                    "type": "done",
+                    "iterations": event["iterations"],
+                    "input_tokens": event["input_tokens"],
+                    "output_tokens": event["output_tokens"],
+                    "memory_hits": event["memory_hits"],
+                    "tool_calls_made": event["tool_calls_made"],
+                }
+
+    def reset_conversation(self) -> None:
+        """Clear conversation history (start a new session)."""
+        self._conversation = []
+        logger.debug("Conversation history cleared.")
+
+    @property
+    def conversation_length(self) -> int:
+        """Number of messages in the current conversation history."""
+        return len(self._conversation)
+
+    # ------------------------------------------------------------------
+    # Private: core loop
+    # ------------------------------------------------------------------
+
+    async def _prepare_turn(self, question: str) -> tuple[int, str]:
+        """Add user message, retrieve memory, build per-turn system prompt.
+
+        Returns:
+            (memory_hits, system_prompt) tuple.
+        """
+        if not self._ready:
             self.setup()
 
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S UTC")
-        system_prompt = f"Current datetime: {now}\n\n{self._system_prompt}"
         self._conversation.append(Message(role="user", content=question))
 
+        memory_hits = 0
+        memory_context = ""
+
+        if self._memory is not None:
+            entries = await self._memory.retrieve(question, top_k=self._memory_top_k)
+            if entries:
+                memory_hits = len(entries)
+                lines = ["## Relevant past interactions\n"]
+                for e in entries:
+                    lines.append(f"Q: {e.question}")
+                    lines.append(f"Tool: {e.tool_name} | Args: {e.tool_args}")
+                    lines.append(f"Result: {e.result_summary}\n")
+                memory_context = "\n".join(lines) + "\n\n"
+
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S UTC")
+        system_prompt = f"Current datetime: {now}\n\n{memory_context}{self._system_prompt}"
+
+        return memory_hits, system_prompt
+
+    async def _run_loop(
+        self,
+        question: str,
+        system_prompt: str,
+        memory_hits: int,
+    ) -> AsyncGenerator[dict, None]:
+        """Core LLM ↔ tool loop. Yields typed event dicts.
+
+        Event types:
+          - tool_call:   {type, tool_name, tool_args}
+          - tool_result: {type, tool_name, tool_args, success, result_text}
+          - answer:      {type, text, iterations, input_tokens, output_tokens,
+                          memory_hits, tool_calls_made}
+        """
         tool_calls_made: list[str] = []
         total_input_tokens = 0
         total_output_tokens = 0
@@ -325,19 +324,18 @@ class MangoAgent:
             if not response.has_tool_calls:
                 answer = response.text or ""
                 self._conversation.append(Message(role="assistant", content=answer))
-                self._prune_conversation()
-
-                yield {"type": "answer", "text": answer}
                 yield {
-                    "type": "done",
+                    "type": "answer",
+                    "text": answer,
                     "iterations": iterations,
                     "input_tokens": total_input_tokens,
                     "output_tokens": total_output_tokens,
-                    "memory_hits": 0,
+                    "memory_hits": memory_hits,
                     "tool_calls_made": tool_calls_made,
                 }
                 return
 
+            # Record the assistant turn (may include both text and tool calls).
             assistant_content: list[dict] = []
             if response.text:
                 assistant_content.append({"type": "text", "text": response.text})
@@ -348,6 +346,7 @@ class MangoAgent:
                     "name": tc.tool_name,
                     "input": tc.tool_args,
                 }
+                # Preserve Gemini 3 thought_signature for round-tripping (required to avoid 400 errors).
                 if tc.thought_signature is not None:
                     block["thought_signature"] = tc.thought_signature
                 assistant_content.append(block)
@@ -357,29 +356,31 @@ class MangoAgent:
 
             for tc in response.tool_calls:
                 tool_calls_made.append(tc.tool_name)
-                logger.info("Tool call (stream): %s(%s)", tc.tool_name, tc.tool_args)
+                logger.info("Tool call: %s(%s)", tc.tool_name, tc.tool_args)
 
                 yield {"type": "tool_call", "tool_name": tc.tool_name, "tool_args": tc.tool_args}
 
                 result = await self._registry.execute(tc.tool_name, **tc.tool_args)
                 result_text = result.as_text()
 
+                logger.debug("Tool result (%s): %.200s…", tc.tool_name, result_text)
+
                 if result.success and tc.tool_name not in _MEMORY_TOOL_NAMES:
                     await self._auto_store_memory(question, tc.tool_name, tc.tool_args, result_text)
 
-                preview = result_text[:200] + "…" if len(result_text) > 200 else result_text
                 yield {
                     "type": "tool_result",
                     "tool_name": tc.tool_name,
+                    "tool_args": tc.tool_args,
                     "success": result.success,
-                    "preview": preview,
+                    "result_text": result_text,
                 }
 
                 self._conversation.append(
                     Message(role="tool", content=result_text, tool_call_id=tc.tool_call_id)
                 )
 
-        # Safety cap reached.
+        # Safety cap reached — ask LLM for a final answer with no tools.
         logger.warning("Max iterations (%d) reached.", self._max_iterations)
         response = self._llm.chat(
             messages=self._conversation,
@@ -388,13 +389,13 @@ class MangoAgent:
         )
         answer = response.text or "I reached the maximum number of steps. Please try rephrasing your question."
         self._conversation.append(Message(role="assistant", content=answer))
-        yield {"type": "answer", "text": answer}
         yield {
-            "type": "done",
+            "type": "answer",
+            "text": answer,
             "iterations": iterations,
             "input_tokens": total_input_tokens + response.input_tokens,
             "output_tokens": total_output_tokens + response.output_tokens,
-            "memory_hits": 0,
+            "memory_hits": memory_hits,
             "tool_calls_made": tool_calls_made,
         }
 
@@ -412,9 +413,8 @@ class MangoAgent:
         if excess <= 0:
             return
         cutoff = turn_starts[excess]
-        removed = cutoff
         self._conversation = self._conversation[cutoff:]
-        logger.debug("Pruned %d messages (%d turns removed).", removed, excess)
+        logger.debug("Pruned %d messages (%d turns removed).", cutoff, excess)
 
     async def _auto_store_memory(
         self, question: str, tool_name: str, tool_args: dict, result_text: str
@@ -434,14 +434,3 @@ class MangoAgent:
             logger.info("Auto-saved memory entry: %s(%s)", tool_name, str(tool_args)[:60])
         except Exception as exc:
             logger.warning("Failed to auto-save memory entry: %s", exc)
-
-    def reset_conversation(self) -> None:
-        """Clear conversation history (start a new session)."""
-        self._conversation = []
-        logger.debug("Conversation history cleared.")
-
-    @property
-    def conversation_length(self) -> int:
-        """Number of messages in the current conversation history."""
-        return len(self._conversation)
-

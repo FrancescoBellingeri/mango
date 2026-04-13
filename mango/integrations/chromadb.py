@@ -17,12 +17,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import uuid
 
 import chromadb
 from chromadb.config import Settings
 
-from mango.memory import MemoryEntry, MemoryService, TextMemoryEntry
+from mango.memory import MemoryEntry, MemoryService, TextMemoryEntry, make_entry_id
 
 logger = logging.getLogger(__name__)
 
@@ -215,6 +214,3 @@ class ChromaAgentMemory(MemoryService):
         return self._collection.count()
 
 
-def make_entry_id() -> str:
-    """Generate a unique ID for a new MemoryEntry."""
-    return str(uuid.uuid4())

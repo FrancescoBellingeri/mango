@@ -9,6 +9,8 @@
 
 > Ask your MongoDB database anything in plain language. Mango translates your question into an MQL query, runs it, and gives you a clear answer — with memory that improves over time.
 
+<video src="src/video_readme.webm" controls width="100%"></video>
+
 ---
 
 ## What You Get
