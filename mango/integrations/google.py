@@ -1,4 +1,3 @@
-
 """Google Gemini implementation of LLMService.
 
 Supports both Google AI Studio (api_key) and Vertex AI (vertexai=True).
@@ -22,137 +21,6 @@ from typing import Any
 from mango.llm import LLMResponse, LLMService, Message, ToolCall, ToolDef, ToolParam
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Conversion helpers  (types module passed in to keep imports lazy)
-# ---------------------------------------------------------------------------
-
-
-def _build_schema(params: list[ToolParam], types: Any) -> Any:
-    """Convert ToolParam list to a Gemini Schema object."""
-    properties: dict = {}
-    required: list[str] = []
-
-    for p in params:
-        type_map = {
-            "string": "STRING",
-            "integer": "INTEGER",
-            "number": "NUMBER",
-            "boolean": "BOOLEAN",
-            "object": "OBJECT",
-            "array": "ARRAY",
-        }
-        gemini_type = type_map.get(p.type, "STRING")
-
-        prop_kwargs: dict[str, Any] = {
-            "type": gemini_type,
-            "description": p.description,
-        }
-        if p.enum:
-            prop_kwargs["enum"] = p.enum
-        if p.type == "array" and p.items:
-            item_type = type_map.get(p.items.get("type", "string"), "STRING")
-            prop_kwargs["items"] = types.Schema(type=item_type)
-
-        properties[p.name] = types.Schema(**prop_kwargs)
-        if p.required:
-            required.append(p.name)
-
-    return types.Schema(
-        type="OBJECT",
-        properties=properties,
-        required=required if required else None,
-    )
-
-
-def _to_gemini_tools(tools: list[ToolDef], types: Any) -> list:
-    """Convert ToolDef list to a single Gemini Tool with all function declarations."""
-    if not tools:
-        return []
-
-    declarations = [
-        types.FunctionDeclaration(
-            name=t.name,
-            description=t.description,
-            parameters=_build_schema(t.params, types) if t.params else None,
-        )
-        for t in tools
-    ]
-    return [types.Tool(function_declarations=declarations)]
-
-
-def _to_gemini_contents(
-    messages: list[Message],
-    system_prompt: str,
-    types: Any,
-) -> tuple[str | None, list]:
-    """Convert Message list to (system_instruction, contents).
-
-    Gemini separates the system prompt from the conversation history.
-    Tool results use role 'user' with a FunctionResponse part.
-    """
-    contents: list = []
-
-    for m in messages:
-        if m.role == "tool":
-            # Tool result — must be wrapped in a user turn with FunctionResponse.
-            part = types.Part.from_function_response(
-                name=_extract_tool_name(m),
-                response={"result": m.content if isinstance(m.content, str) else json.dumps(m.content)},
-            )
-            contents.append(types.Content(role="user", parts=[part]))
-
-        elif m.role == "assistant":
-            if isinstance(m.content, list):
-                # Assistant turn with possible tool calls.
-                parts: list = []
-                for block in m.content:
-                    if block.get("type") == "text":
-                        parts.append(types.Part.from_text(text=block["text"]))
-                    elif block.get("type") == "tool_use":
-                        fc_part = types.Part.from_function_call(
-                            name=block["name"],
-                            args=block["input"],
-                        )
-                        # Gemini 3 requires thought_signature to be round-tripped
-                        # back on each functionCall part (400 error if missing).
-                        if block.get("thought_signature"):
-                            fc_part.thought_signature = block["thought_signature"]
-                        parts.append(fc_part)
-                contents.append(types.Content(role="model", parts=parts))
-            else:
-                contents.append(
-                    types.Content(
-                        role="model",
-                        parts=[types.Part.from_text(text=str(m.content))],
-                    )
-                )
-
-        else:  # user
-            content = m.content if isinstance(m.content, str) else json.dumps(m.content)
-            contents.append(
-                types.Content(
-                    role="user",
-                    parts=[types.Part.from_text(text=content)],
-                )
-            )
-
-    return system_prompt or None, contents
-
-
-def _extract_tool_name(m: Message) -> str:
-    """Best-effort extraction of the tool name from a tool-result message.
-
-    The tool_call_id in our system is the provider's call ID. For Gemini
-    we store the tool name as the tool_call_id (see below).
-    """
-    return m.tool_call_id or "unknown_tool"
-
-
-# ---------------------------------------------------------------------------
-# Service
-# ---------------------------------------------------------------------------
 
 
 class GeminiLlmService(LLMService):
@@ -197,6 +65,121 @@ class GeminiLlmService(LLMService):
         self._max_output_tokens = max_output_tokens
         self._temperature = temperature
 
+    @staticmethod
+    def _build_schema(params: list[ToolParam], types: Any) -> Any:
+        properties: dict = {}
+        required: list[str] = []
+
+        for p in params:
+            type_map = {
+                "string": "STRING",
+                "integer": "INTEGER",
+                "number": "NUMBER",
+                "boolean": "BOOLEAN",
+                "object": "OBJECT",
+                "array": "ARRAY",
+            }
+            gemini_type = type_map.get(p.type, "STRING")
+
+            prop_kwargs: dict[str, Any] = {
+                "type": gemini_type,
+                "description": p.description,
+            }
+            if p.enum:
+                prop_kwargs["enum"] = p.enum
+            if p.type == "array" and p.items:
+                item_type = type_map.get(p.items.get("type", "string"), "STRING")
+                prop_kwargs["items"] = types.Schema(type=item_type)
+
+            properties[p.name] = types.Schema(**prop_kwargs)
+            if p.required:
+                required.append(p.name)
+
+        return types.Schema(
+            type="OBJECT",
+            properties=properties,
+            required=required if required else None,
+        )
+
+    @staticmethod
+    def _to_gemini_tools(tools: list[ToolDef], types: Any) -> list:
+        if not tools:
+            return []
+
+        declarations = [
+            types.FunctionDeclaration(
+                name=t.name,
+                description=t.description,
+                parameters=GeminiLlmService._build_schema(t.params, types) if t.params else None,
+            )
+            for t in tools
+        ]
+        return [types.Tool(function_declarations=declarations)]
+
+    @staticmethod
+    def _extract_tool_name(m: Message) -> str:
+        # For Gemini we store the tool name as the tool_call_id (see chat method).
+        return m.tool_call_id or "unknown_tool"
+
+    @staticmethod
+    def _to_gemini_contents(
+        messages: list[Message],
+        system_prompt: str,
+        types: Any,
+    ) -> tuple[str | None, list]:
+        """Convert Message list to (system_instruction, contents).
+
+        Gemini separates the system prompt from the conversation history.
+        Tool results use role 'user' with a FunctionResponse part.
+        """
+        contents: list = []
+
+        for m in messages:
+            if m.role == "tool":
+                # Tool result — must be wrapped in a user turn with FunctionResponse.
+                part = types.Part.from_function_response(
+                    name=GeminiLlmService._extract_tool_name(m),
+                    response={"result": m.content if isinstance(m.content, str) else json.dumps(m.content)},
+                )
+                contents.append(types.Content(role="user", parts=[part]))
+
+            elif m.role == "assistant":
+                if isinstance(m.content, list):
+                    # Assistant turn with possible tool calls.
+                    parts: list = []
+                    for block in m.content:
+                        if block.get("type") == "text":
+                            parts.append(types.Part.from_text(text=block["text"]))
+                        elif block.get("type") == "tool_use":
+                            fc_part = types.Part.from_function_call(
+                                name=block["name"],
+                                args=block["input"],
+                            )
+                            # Gemini 3 requires thought_signature to be round-tripped
+                            # back on each functionCall part (400 error if missing).
+                            if block.get("thought_signature"):
+                                fc_part.thought_signature = block["thought_signature"]
+                            parts.append(fc_part)
+                    contents.append(types.Content(role="model", parts=parts))
+                else:
+                    contents.append(
+                        types.Content(
+                            role="model",
+                            parts=[types.Part.from_text(text=str(m.content))],
+                        )
+                    )
+
+            else:  # user
+                content = m.content if isinstance(m.content, str) else json.dumps(m.content)
+                contents.append(
+                    types.Content(
+                        role="user",
+                        parts=[types.Part.from_text(text=content)],
+                    )
+                )
+
+        return system_prompt or None, contents
+
     def chat(
         self,
         messages: list[Message],
@@ -204,7 +187,7 @@ class GeminiLlmService(LLMService):
         system_prompt: str = "",
     ) -> LLMResponse:
         types = self._types
-        system_instruction, contents = _to_gemini_contents(messages, system_prompt, types)
+        system_instruction, contents = self._to_gemini_contents(messages, system_prompt, types)
 
         config_kwargs: dict[str, Any] = {
             "temperature": self._temperature,
@@ -213,7 +196,7 @@ class GeminiLlmService(LLMService):
         if system_instruction:
             config_kwargs["system_instruction"] = system_instruction
         if tools:
-            config_kwargs["tools"] = _to_gemini_tools(tools, types)
+            config_kwargs["tools"] = self._to_gemini_tools(tools, types)
 
         config = types.GenerateContentConfig(**config_kwargs)
 

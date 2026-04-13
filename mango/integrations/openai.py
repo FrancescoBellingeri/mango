@@ -7,83 +7,6 @@ import json
 from mango.llm import LLMResponse, LLMService, Message, ToolCall, ToolDef, ToolParam
 
 
-def _build_parameters(params: list[ToolParam]) -> dict:
-    """Convert ToolParam list to JSON Schema parameters object."""
-    properties: dict = {}
-    required: list[str] = []
-
-    for p in params:
-        prop: dict = {"type": p.type, "description": p.description}
-        if p.enum:
-            prop["enum"] = p.enum
-        if p.items:
-            prop["items"] = p.items
-        properties[p.name] = prop
-        if p.required:
-            required.append(p.name)
-
-    schema: dict = {"type": "object", "properties": properties}
-    if required:
-        schema["required"] = required
-    return schema
-
-
-def _to_openai_tools(tools: list[ToolDef]) -> list[dict]:
-    """Convert ToolDef list to OpenAI tool definitions."""
-    return [
-        {
-            "type": "function",
-            "function": {
-                "name": t.name,
-                "description": t.description,
-                "parameters": _build_parameters(t.params),
-            },
-        }
-        for t in tools
-    ]
-
-
-def _to_openai_messages(messages: list[Message], system_prompt: str) -> list[dict]:
-    """Convert Message list to OpenAI message format."""
-    result: list[dict] = []
-
-    if system_prompt:
-        result.append({"role": "system", "content": system_prompt})
-
-    for m in messages:
-        if m.role == "tool":
-            result.append({
-                "role": "tool",
-                "tool_call_id": m.tool_call_id,
-                "content": m.content if isinstance(m.content, str) else json.dumps(m.content),
-            })
-        elif m.role == "assistant" and isinstance(m.content, list):
-            # Reconstruct assistant message with tool_calls.
-            text_parts = [b["text"] for b in m.content if b.get("type") == "text"]
-            tool_calls = [
-                {
-                    "id": b["id"],
-                    "type": "function",
-                    "function": {
-                        "name": b["name"],
-                        "arguments": json.dumps(b["input"]),
-                    },
-                }
-                for b in m.content
-                if b.get("type") == "tool_use"
-            ]
-            msg: dict = {"role": "assistant"}
-            if text_parts:
-                msg["content"] = " ".join(text_parts)
-            if tool_calls:
-                msg["tool_calls"] = tool_calls
-            result.append(msg)
-        else:
-            result.append({"role": m.role, "content": m.content})
-
-    return result
-
-
 class OpenAiLlmService(LLMService):
     """LLMService backed by OpenAI.
 
@@ -111,6 +34,80 @@ class OpenAiLlmService(LLMService):
         self._model = model
         self._max_completion_tokens = max_completion_tokens
 
+    @staticmethod
+    def _build_parameters(params: list[ToolParam]) -> dict:
+        properties: dict = {}
+        required: list[str] = []
+
+        for p in params:
+            prop: dict = {"type": p.type, "description": p.description}
+            if p.enum:
+                prop["enum"] = p.enum
+            if p.items:
+                prop["items"] = p.items
+            properties[p.name] = prop
+            if p.required:
+                required.append(p.name)
+
+        schema: dict = {"type": "object", "properties": properties}
+        if required:
+            schema["required"] = required
+        return schema
+
+    @staticmethod
+    def _to_openai_tools(tools: list[ToolDef]) -> list[dict]:
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": OpenAiLlmService._build_parameters(t.params),
+                },
+            }
+            for t in tools
+        ]
+
+    @staticmethod
+    def _to_openai_messages(messages: list[Message], system_prompt: str) -> list[dict]:
+        result: list[dict] = []
+
+        if system_prompt:
+            result.append({"role": "system", "content": system_prompt})
+
+        for m in messages:
+            if m.role == "tool":
+                result.append({
+                    "role": "tool",
+                    "tool_call_id": m.tool_call_id,
+                    "content": m.content if isinstance(m.content, str) else json.dumps(m.content),
+                })
+            elif m.role == "assistant" and isinstance(m.content, list):
+                # Reconstruct assistant message with tool_calls.
+                text_parts = [b["text"] for b in m.content if b.get("type") == "text"]
+                tool_calls = [
+                    {
+                        "id": b["id"],
+                        "type": "function",
+                        "function": {
+                            "name": b["name"],
+                            "arguments": json.dumps(b["input"]),
+                        },
+                    }
+                    for b in m.content
+                    if b.get("type") == "tool_use"
+                ]
+                msg: dict = {"role": "assistant"}
+                if text_parts:
+                    msg["content"] = " ".join(text_parts)
+                if tool_calls:
+                    msg["tool_calls"] = tool_calls
+                result.append(msg)
+            else:
+                result.append({"role": m.role, "content": m.content})
+
+        return result
+
     def chat(
         self,
         messages: list[Message],
@@ -120,10 +117,10 @@ class OpenAiLlmService(LLMService):
         kwargs: dict = {
             "model": self._model,
             "max_completion_tokens": self._max_completion_tokens,
-            "messages": _to_openai_messages(messages, system_prompt),
+            "messages": self._to_openai_messages(messages, system_prompt),
         }
         if tools:
-            kwargs["tools"] = _to_openai_tools(tools)
+            kwargs["tools"] = self._to_openai_tools(tools)
             kwargs["tool_choice"] = "auto"
 
         response = self._client.chat.completions.create(**kwargs)

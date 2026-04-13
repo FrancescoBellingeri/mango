@@ -5,60 +5,6 @@ from __future__ import annotations
 from mango.llm import LLMResponse, LLMService, Message, ToolCall, ToolDef, ToolParam
 
 
-def _build_input_schema(params: list[ToolParam]) -> dict:
-    """Convert ToolParam list to JSON Schema object expected by Anthropic."""
-    properties: dict = {}
-    required: list[str] = []
-
-    for p in params:
-        prop: dict = {"type": p.type, "description": p.description}
-        if p.enum:
-            prop["enum"] = p.enum
-        if p.items:
-            prop["items"] = p.items
-        properties[p.name] = prop
-        if p.required:
-            required.append(p.name)
-
-    schema: dict = {"type": "object", "properties": properties}
-    if required:
-        schema["required"] = required
-    return schema
-
-
-def _to_anthropic_tools(tools: list[ToolDef]) -> list[dict]:
-    """Convert ToolDef list to Anthropic tool definitions."""
-    return [
-        {
-            "name": t.name,
-            "description": t.description,
-            "input_schema": _build_input_schema(t.params),
-        }
-        for t in tools
-    ]
-
-
-def _to_anthropic_messages(messages: list[Message]) -> list[dict]:
-    """Convert Message list to Anthropic message format."""
-    result = []
-    for m in messages:
-        if m.role == "tool":
-            # Tool results are appended inside a user turn
-            result.append({
-                "role": "user",
-                "content": [
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": m.tool_call_id,
-                        "content": m.content if isinstance(m.content, str) else str(m.content),
-                    }
-                ],
-            })
-        else:
-            result.append({"role": m.role, "content": m.content})
-    return result
-
-
 class AnthropicLlmService(LLMService):
     """LLMService backed by Anthropic Claude.
 
@@ -86,6 +32,56 @@ class AnthropicLlmService(LLMService):
         self._model = model
         self._max_tokens = max_tokens
 
+    @staticmethod
+    def _build_input_schema(params: list[ToolParam]) -> dict:
+        properties: dict = {}
+        required: list[str] = []
+
+        for p in params:
+            prop: dict = {"type": p.type, "description": p.description}
+            if p.enum:
+                prop["enum"] = p.enum
+            if p.items:
+                prop["items"] = p.items
+            properties[p.name] = prop
+            if p.required:
+                required.append(p.name)
+
+        schema: dict = {"type": "object", "properties": properties}
+        if required:
+            schema["required"] = required
+        return schema
+
+    @staticmethod
+    def _to_anthropic_tools(tools: list[ToolDef]) -> list[dict]:
+        return [
+            {
+                "name": t.name,
+                "description": t.description,
+                "input_schema": AnthropicLlmService._build_input_schema(t.params),
+            }
+            for t in tools
+        ]
+
+    @staticmethod
+    def _to_anthropic_messages(messages: list[Message]) -> list[dict]:
+        result = []
+        for m in messages:
+            if m.role == "tool":
+                result.append({
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": m.tool_call_id,
+                            "content": m.content if isinstance(m.content, str) else str(m.content),
+                        }
+                    ],
+                })
+            else:
+                result.append({"role": m.role, "content": m.content})
+        return result
+
     def chat(
         self,
         messages: list[Message],
@@ -95,12 +91,12 @@ class AnthropicLlmService(LLMService):
         kwargs: dict = {
             "model": self._model,
             "max_tokens": self._max_tokens,
-            "messages": _to_anthropic_messages(messages),
+            "messages": self._to_anthropic_messages(messages),
         }
         if system_prompt:
             kwargs["system"] = system_prompt
         if tools:
-            kwargs["tools"] = _to_anthropic_tools(tools)
+            kwargs["tools"] = self._to_anthropic_tools(tools)
 
         response = self._client.messages.create(**kwargs)
 

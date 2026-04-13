@@ -13,7 +13,6 @@ from mango.tools import (
 )
 from mango.servers.fastapi import MangoFastAPIServer
 from mango.integrations.google import GeminiLlmService
-from mango.integrations.anthropic import AnthropicLlmService
 from mango.integrations.mongodb import MongoRunner
 from mango.integrations.chromadb import ChromaAgentMemory
 from dotenv import load_dotenv
@@ -21,9 +20,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Configure your LLM
-llm = AnthropicLlmService(
+llm = GeminiLlmService(
     model="gemini-3.1-pro-preview",
-    api_key=os.getenv("GEMINI_API_KEY"),
+    api_key=os.getenv("GOOGLE_API_KEY"),
 )
 
 # Configure your database
