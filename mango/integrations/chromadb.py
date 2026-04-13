@@ -27,21 +27,6 @@ from mango.memory import MemoryEntry, MemoryService, TextMemoryEntry
 logger = logging.getLogger(__name__)
 
 
-def _get_or_create(client: chromadb.ClientAPI, name: str) -> chromadb.Collection:
-    """Get an existing ChromaDB collection or create it.
-
-    We try get_collection() first to avoid re-instantiating the embedding
-    model on every restart (which would trigger a model download check).
-    """
-    try:
-        return client.get_collection(name=name)
-    except Exception:
-        return client.create_collection(
-            name=name,
-            metadata={"hnsw:space": "cosine"},
-        )
-
-
 class ChromaAgentMemory(MemoryService):
     """MemoryService backed by ChromaDB.
 
@@ -53,6 +38,17 @@ class ChromaAgentMemory(MemoryService):
             Tool memories go into ``<collection_name>``,
             text memories into ``<collection_name>_text``.
     """
+
+    @staticmethod
+    def _get_or_create(client: chromadb.ClientAPI, name: str) -> chromadb.Collection:
+        # get_collection first to avoid re-instantiating the embedding model on restart.
+        try:
+            return client.get_collection(name=name)
+        except Exception:
+            return client.create_collection(
+                name=name,
+                metadata={"hnsw:space": "cosine"},
+            )
 
     def __init__(
         self,
@@ -67,8 +63,8 @@ class ChromaAgentMemory(MemoryService):
                 settings=Settings(anonymized_telemetry=False),
             )
 
-        self._collection = _get_or_create(self._client, collection_name)
-        self._text_collection = _get_or_create(self._client, f"{collection_name}_text")
+        self._collection = self._get_or_create(self._client, collection_name)
+        self._text_collection = self._get_or_create(self._client, f"{collection_name}_text")
 
         logger.info(
             "ChromaMemoryService ready — tool entries: %d, text entries: %d.",

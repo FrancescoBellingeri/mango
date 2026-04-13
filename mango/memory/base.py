@@ -10,6 +10,8 @@ All I/O methods are async so implementations can offload blocking work
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from mango.memory.models import MemoryEntry, TextMemoryEntry
+
 
 class MemoryService(ABC):
     """ABC for memory backends.
