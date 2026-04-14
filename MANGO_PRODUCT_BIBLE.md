@@ -24,6 +24,7 @@
 11. [Technology Stack](#11-technology-stack)
 12. [Development Roadmap](#12-development-roadmap)
 13. [Conventions for Claude Code](#13-conventions-for-claude-code)
+14. [Features to Implement](#14-features-to-implement)
 
 ---
 
@@ -833,6 +834,153 @@ When implementing, follow this order to ensure dependencies are available:
 | 15 | `prompts/examples.py` | Nothing |
 | 16 | `core/agent.py` | Everything above |
 | 17 | `cli/app.py` | `core/agent.py` |
+
+---
+
+## 14. Features to Implement
+
+This section tracks features approved for implementation but not yet built. Each entry describes what the feature is, why it matters for Mango, and the key design decisions to make before implementing.
+
+---
+
+### 14.1 Custom System Prompt
+
+**What:** Allow callers to inject additional instructions into the system prompt at agent creation time or per-turn.
+
+**Why:** Different deployments have different needs — a fintech app might need "always format currency in EUR", a SaaS might need tenant-scoped instructions. Today the system prompt is fully controlled by `build_system_prompt()`.
+
+**Design decisions:**
+- `MangoAgent(system_prompt_suffix="...")` for static additions
+- Per-turn injection via `ask(question, context="...")` for dynamic additions
+- Must not allow overriding the core read-only safety instructions
+
+---
+
+### 14.2 Custom Charts
+
+**What:** A `VisualizeDataTool` that the LLM can call to render query results as charts (bar, line, pie, scatter).
+
+**Why:** Tabular data is hard to read for trend and distribution questions. "Show me daily revenue for March" deserves a chart, not a DataFrame dump.
+
+**Design decisions:**
+- Tool receives a DataFrame + chart type + axis config
+- CLI: render via `matplotlib` inline or save to file
+- API: return base64-encoded image or Vega-Lite spec in the SSE stream
+- The LLM decides when to call it — not forced on every query
+
+---
+
+### 14.3 Custom Middleware
+
+**What:** A middleware layer on `ToolRegistry` that wraps tool execution with pluggable hooks. Reference use case: query result caching.
+
+**Why:** Production deployments need cross-cutting concerns (caching, rate limiting, logging, circuit breakers) without touching individual tool implementations.
+
+**Design decisions:**
+- `ToolRegistry.add_middleware(fn)` — chain of async callables
+- Each middleware receives `(tool_name, kwargs, next)` and returns `ToolResult`
+- Built-in middlewares to ship: `CacheMiddleware` (in-memory TTL cache), `RateLimitMiddleware`
+- Middleware order matters — document it clearly
+
+---
+
+### 14.4 Error Recovery
+
+**What:** When a tool call fails (bad MQL, timeout, validation error), the agent automatically retries with the error message injected back into the conversation, up to a configurable max.
+
+**Why:** Currently a failed tool call surfaces the raw error to the user. LLMs are good at self-correcting when given the error — we should leverage this.
+
+**Design decisions:**
+- `max_retries: int = 2` on `MangoAgent`
+- Error message format fed back to LLM must include: tool name, args used, exact error
+- Distinguish retryable errors (bad query syntax) from non-retryable (connection down)
+- Count retries inside `_run_loop` without resetting `iterations`
+
+---
+
+### 14.5 Observability
+
+**What:** Structured event emission for every agent action — LLM calls, tool executions, memory hits, token usage — consumable by OpenTelemetry, Datadog, or custom sinks.
+
+**Why:** Production users need to monitor latency, cost (tokens), and failure rates. Today everything goes to `logging` with no structure.
+
+**Design decisions:**
+- `ObservabilityBackend` ABC with a single `emit(event: AgentEvent)` method
+- `AgentEvent` dataclass: `type`, `timestamp`, `duration_ms`, `metadata`
+- Built-in: `LoggingObservabilityBackend` (default, uses existing logger), `OTelObservabilityBackend`
+- `MangoAgent(observability=MyBackend())` — optional, no-op if not set
+- Events to emit: `llm_call`, `tool_call`, `tool_result`, `memory_retrieve`, `memory_store`, `answer`
+
+---
+
+### 14.6 Audit Logging
+
+**What:** Immutable, append-only log of every query executed against the database, with user identity, question, generated MQL, result row count, and timestamp.
+
+**Why:** Required for compliance in regulated industries (finance, healthcare). Separate from observability — audit logs must be tamper-evident and long-lived.
+
+**Design decisions:**
+- `AuditLogger` ABC: `log(entry: AuditEntry) -> None`
+- `AuditEntry`: `id`, `timestamp`, `user_id`, `question`, `tool_name`, `tool_args`, `row_count`, `success`
+- Built-in: `FileAuditLogger` (JSONL append-only), `MongoAuditLogger` (writes to a separate audit collection)
+- `MangoAgent(audit_logger=MyLogger(), user_id="...")` — `user_id` threaded through the whole turn
+- Must log even failed queries
+
+---
+
+### 14.7 Multi-Database Support
+
+**What:** A single `MangoAgent` instance that can query across multiple connected databases, with the LLM deciding which one to target.
+
+**Why:** Real applications often span multiple databases (e.g. `orders_db` and `analytics_db`). Today one agent = one database.
+
+**Design decisions:**
+- `MangoAgent(databases={"orders": mongo1, "analytics": mongo2})`
+- Tools receive a `db_name` parameter; the LLM picks the right one
+- Schema context includes all databases, clearly labelled
+- Memory entries are scoped per database
+
+---
+
+### 14.8 Conversation Persistence
+
+**What:** Save and restore conversation history to/from disk or a database, so sessions survive process restarts.
+
+**Why:** Today conversation history lives in memory — a server restart wipes all active sessions. Long-running sessions (multi-hour analyses) should be resumable.
+
+**Design decisions:**
+- `ConversationStore` ABC: `save(session_id, messages)`, `load(session_id) -> list[Message]`
+- Built-in: `JsonFileConversationStore`, `MongoConversationStore`
+- `MangoAgent(conversation_store=MyStore(), session_id="abc123")`
+- Auto-save after each turn; load on first `ask()` if `session_id` matches existing
+
+---
+
+### 14.9 Collection Access Control
+
+**What:** Whitelist or blacklist specific collections per agent instance, preventing the LLM from querying sensitive data even if it tries.
+
+**Why:** Multi-tenant deployments must ensure tenant A cannot access tenant B's collections. Security-sensitive collections (`users`, `payments`) may need to be off-limits for certain agent instances.
+
+**Design decisions:**
+- `MangoAgent(allowed_collections=["orders", "products"])` or `denied_collections=["users", "payments"]`
+- Enforced at `ToolRegistry` level — `run_mql` raises `ValidationError` before hitting the DB
+- Schema introspection respects the same rules — denied collections never appear in the prompt
+- Log access attempts on denied collections to audit log
+
+---
+
+### 14.10 Result Export
+
+**What:** Allow users to export query results as CSV, JSON, or Excel directly from the CLI or API.
+
+**Why:** Analysts want to take results into their own tools (Excel, BI platforms). Today results are only returned as text summaries.
+
+**Design decisions:**
+- CLI: `/export csv`, `/export json` saves last result to file
+- API: `POST /api/v1/ask/export` returns file download
+- The raw `pd.DataFrame` from `execute_query` is already the ideal source — just serialize it
+- Include the original question and generated MQL in the export metadata
 
 ---
 

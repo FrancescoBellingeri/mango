@@ -55,8 +55,7 @@ class MangoAgent:
         llm_service: LLM service to use for generating responses.
         tool_registry: Tool registry populated with the available tools.
         db: Connected NoSQL db (used for schema introspection at
-                 setup time). Optional — if None, no schema is injected and
-                 setup() is a no-op.
+                 setup time).
         agent_memory: Optional memory service. If provided, similar past
                       interactions are injected as few-shot examples.
         schema: Pre-introspected schema (optional; fetched lazily if None).
@@ -70,7 +69,7 @@ class MangoAgent:
         self,
         llm_service: LLMService,
         tool_registry: ToolRegistry,
-        db: NoSQLRunner | None = None,
+        db: NoSQLRunner,
         agent_memory: MemoryService | None = None,
         schema: dict[str, SchemaInfo] | None = None,
         introspect: bool = False,
@@ -104,7 +103,7 @@ class MangoAgent:
         return self._registry
 
     @property
-    def db(self) -> NoSQLRunner | None:
+    def db(self) -> NoSQLRunner:
         return self._db
 
     @property
@@ -119,13 +118,7 @@ class MangoAgent:
         """Initialise the agent: introspect schema and build system prompt.
 
         Call once after connecting the db, before the first ask().
-        If no db was provided, this method is a no-op.
         """
-        if self._db is None:
-            logger.info("No db configured — skipping schema introspection.")
-            self._ready = True
-            return
-
         db_name = getattr(
             getattr(self._db, "_database", None), "name", "unknown"
         )
