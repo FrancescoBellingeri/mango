@@ -12,7 +12,7 @@
 
 ![Mango demo](src/readme_mango.gif)
 
----
+<h2 align="center"><a href="https://mango.francescobellingeri.com/">📖 Full documentation</a></h2>
 
 ## Install
 
@@ -82,8 +82,6 @@ server.run()  # http://localhost:8000
 ```
 
 Your endpoint is live at `POST /api/v1/ask/stream` — ready to connect to any frontend.
-
-Full documentation at **[mango.francescobellingeri.com](https://mango.francescobellingeri.com/)** — start with the [Getting Started guide](https://mango.francescobellingeri.com/docs/getting-started/installation).
 
 ---
 
