@@ -281,7 +281,12 @@ class RunMQLTool(Tool):
                 ToolParam(
                     name="pipeline",
                     type="array",
-                    description="Aggregation pipeline stages (for aggregate).",
+                    description=(
+                        "Aggregation pipeline stages. "
+                        "REQUIRED when operation is 'aggregate' — must be a non-empty list. "
+                        "Example: [{\"$group\": {\"_id\": \"$field\", \"count\": {\"$sum\": 1}}}]. "
+                        "Omit for find/count/distinct."
+                    ),
                     required=False,
                     items={"type": "object"},
                 ),

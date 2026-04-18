@@ -206,7 +206,7 @@ class TestPipelineStageCheck:
             pipeline=[{"$match": {}, "$limit": 5}],
         ))
         assert not r.valid
-        assert any("exactly one key" in e for e in r.errors)
+        assert any("has 2 keys" in e for e in r.errors)
 
 
 # ---------------------------------------------------------------------------

@@ -31,6 +31,6 @@ Quick start::
     server.run()  # http://localhost:8000
 """
 
-from mango.agent.agent import MangoAgent
+from mango.agent.agent import AgentResponse, MangoAgent
 
-__all__ = ["MangoAgent"]
+__all__ = ["MangoAgent", "AgentResponse"]

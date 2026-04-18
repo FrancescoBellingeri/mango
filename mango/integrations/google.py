@@ -232,8 +232,8 @@ class GeminiLlmService(LLMService):
             text=text,
             tool_calls=tool_calls,
             model=self._model,
-            input_tokens=usage.prompt_token_count if usage else 0,
-            output_tokens=usage.candidates_token_count if usage else 0,
+            input_tokens=(usage.prompt_token_count or 0) if usage else 0,
+            output_tokens=(usage.candidates_token_count or 0) if usage else 0,
         )
 
     def get_model_name(self) -> str:

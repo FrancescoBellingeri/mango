@@ -22,9 +22,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Configure your LLM
-llm = OpenAiLlmService(
-    model="gpt-5.2",
-    api_key=os.getenv("OPENAI_API_KEY"),
+llm = GeminiLlmService(
+    model="gemini-3.1-pro-preview",
+    api_key=os.getenv("GOOGLE_API_KEY"),
 )
 
 # Configure your database

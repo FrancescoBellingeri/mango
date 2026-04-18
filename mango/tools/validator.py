@@ -226,9 +226,11 @@ class MQLValidator:
                 )
                 continue
             if len(stage) != 1:
+                keys = list(stage.keys())
                 errors.append(
-                    f"Pipeline stage at index {i} must have exactly one key "
-                    f"(the stage operator), got {list(stage.keys())}."
+                    f"Pipeline stage at index {i} has {len(keys)} keys: {keys}. "
+                    f"Each stage must be a single-key dict mapping the operator to its argument, "
+                    f"e.g. {{\"$match\": {{...}}}} or {{\"$group\": {{\"_id\": \"$field\"}}}}."
                 )
                 continue
             stage_op = next(iter(stage))

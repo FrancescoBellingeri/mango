@@ -14,6 +14,7 @@ or until max_iterations is reached (safety cap).
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -35,6 +36,55 @@ _MEMORY_TOOL_NAMES: frozenset[str] = frozenset({
     "save_text_memory",
 })
 
+# Error substrings that indicate infrastructure failures — not retryable.
+_NON_RETRYABLE_PATTERNS: tuple[str, ...] = (
+    "connection refused",
+    "authentication failed",
+    "not connected",
+    "timed out",
+    "network",
+    "cannot connect",
+    "ssl",
+    "certificate",
+)
+
+
+def _is_retryable(error: str) -> bool:
+    """Return True when the error is a query/logic error the LLM can fix."""
+    low = error.lower()
+    return not any(pat in low for pat in _NON_RETRYABLE_PATTERNS)
+
+
+def _retry_message(tool_name: str, tool_args: dict, error: str, attempt: int, max_retries: int) -> str:
+    args_str = json.dumps(tool_args, default=str, indent=2)
+    return (
+        f"[RETRY {attempt}/{max_retries}] Tool '{tool_name}' failed.\n"
+        f"Args used:\n{args_str}\n"
+        f"Error: {error}\n"
+        f"The error is fixable. Rules to follow:\n"
+        f"- All MongoDB stage and operator names MUST start with '$' (e.g. '$match', '$unwind', '$group', '$sort', '$project'). Never omit the dollar sign.\n"
+        f"- Field names and operator names must NOT be wrapped in extra quotes (e.g. use imdb.rating, not \"imdb.rating\").\n"
+        f"Correct the query and call '{tool_name}' again."
+    )
+
+
+def _fatal_message(tool_name: str, error: str) -> str:
+    return (
+        f"[FATAL] Tool '{tool_name}' failed with an infrastructure error that cannot be retried.\n"
+        f"Error: {error}\n"
+        f"Do not retry. Report the error to the user."
+    )
+
+
+def _exhausted_message(tool_name: str, error: str, max_retries: int) -> str:
+    return (
+        f"[MAX RETRIES EXCEEDED] Tool '{tool_name}' has failed {max_retries} times with the same error.\n"
+        f"Last error: {error}\n"
+        f"Do NOT repeat the same approach. Try a different operation or strategy "
+        f"(e.g. use 'find' or 'count' instead of 'aggregate', or simplify the query). "
+        f"If no alternative exists, report the failure to the user."
+    )
+
 
 @dataclass
 class AgentResponse:
@@ -46,6 +96,7 @@ class AgentResponse:
     output_tokens: int = 0
     iterations: int = 0
     memory_hits: int = 0
+    retries_made: int = 0
 
 
 class MangoAgent:
@@ -61,6 +112,7 @@ class MangoAgent:
         schema: Pre-introspected schema (optional; fetched lazily if None).
         introspect: Whether to introspect schema at setup() time.
         max_iterations: Safety cap on tool-call iterations per question.
+        max_retries: Max retries for fixable tool errors before giving up.
         memory_top_k: Number of memory examples to retrieve per question.
         max_turns: Number of conversation turns to keep in history.
     """
@@ -74,6 +126,7 @@ class MangoAgent:
         schema: dict[str, SchemaInfo] | None = None,
         introspect: bool = False,
         max_iterations: int = 8,
+        max_retries: int = 2,
         memory_top_k: int = 3,
         max_turns: int = 5,
     ) -> None:
@@ -84,6 +137,7 @@ class MangoAgent:
         self._schema = schema
         self._introspect = introspect
         self._max_iterations = max_iterations
+        self._max_retries = max_retries
         self._memory_top_k = memory_top_k
         self._max_turns = max_turns
         self._system_prompt: str = ""
@@ -149,6 +203,7 @@ class MangoAgent:
             schema=self._schema,
             introspect=False,
             max_iterations=self._max_iterations,
+            max_retries=self._max_retries,
             memory_top_k=self._memory_top_k,
             max_turns=self._max_turns,
         )
@@ -192,6 +247,7 @@ class MangoAgent:
                     output_tokens=event["output_tokens"],
                     iterations=event["iterations"],
                     memory_hits=event["memory_hits"],
+                    retries_made=event["retries_made"],
                 )
 
         # Should never reach here — _run_loop always yields an answer event.
@@ -209,7 +265,8 @@ class MangoAgent:
         - ``{"type": "tool_result", "tool_name": str, "success": bool, "preview": str}``
         - ``{"type": "answer", "text": str}``
         - ``{"type": "done", "iterations": int, "input_tokens": int,
-               "output_tokens": int, "memory_hits": int, "tool_calls_made": list[str]}``
+               "output_tokens": int, "memory_hits": int, "tool_calls_made": list[str],
+               "retries_made": int}``
         - ``{"type": "error", "message": str}``
         """
         memory_hits, system_prompt = await self._prepare_turn(question)
@@ -237,6 +294,7 @@ class MangoAgent:
                     "output_tokens": event["output_tokens"],
                     "memory_hits": event["memory_hits"],
                     "tool_calls_made": event["tool_calls_made"],
+                    "retries_made": event["retries_made"],
                 }
 
     def reset_conversation(self) -> None:
@@ -295,12 +353,13 @@ class MangoAgent:
           - tool_call:   {type, tool_name, tool_args}
           - tool_result: {type, tool_name, tool_args, success, result_text}
           - answer:      {type, text, iterations, input_tokens, output_tokens,
-                          memory_hits, tool_calls_made}
+                          memory_hits, tool_calls_made, retries_made}
         """
         tool_calls_made: list[str] = []
         total_input_tokens = 0
         total_output_tokens = 0
         iterations = 0
+        retry_count = 0
 
         while iterations < self._max_iterations:
             iterations += 1
@@ -325,6 +384,7 @@ class MangoAgent:
                     "output_tokens": total_output_tokens,
                     "memory_hits": memory_hits,
                     "tool_calls_made": tool_calls_made,
+                    "retries_made": retry_count,
                 }
                 return
 
@@ -358,8 +418,29 @@ class MangoAgent:
 
                 logger.debug("Tool result (%s): %.200s…", tc.tool_name, result_text)
 
-                if result.success and tc.tool_name not in _MEMORY_TOOL_NAMES:
-                    await self._auto_store_memory(question, tc.tool_name, tc.tool_args, result_text)
+                if result.success:
+                    retry_count = 0
+                    if tc.tool_name not in _MEMORY_TOOL_NAMES:
+                        await self._auto_store_memory(question, tc.tool_name, tc.tool_args, result_text)
+                else:
+                    error_msg = result.error or result_text
+                    if _is_retryable(error_msg) and retry_count < self._max_retries:
+                        retry_count += 1
+                        logger.info(
+                            "Retryable error on '%s' (attempt %d/%d): %s",
+                            tc.tool_name, retry_count, self._max_retries, error_msg[:120],
+                        )
+                        result_text = _retry_message(
+                            tc.tool_name, tc.tool_args, error_msg, retry_count, self._max_retries
+                        )
+                    elif not _is_retryable(error_msg):
+                        logger.warning("Non-retryable error on '%s': %s", tc.tool_name, error_msg[:120])
+                        result_text = _fatal_message(tc.tool_name, error_msg)
+                    else:
+                        logger.warning(
+                            "Max retries (%d) exceeded on '%s'.", self._max_retries, tc.tool_name
+                        )
+                        result_text = _exhausted_message(tc.tool_name, error_msg, self._max_retries)
 
                 yield {
                     "type": "tool_result",
@@ -390,6 +471,7 @@ class MangoAgent:
             "output_tokens": total_output_tokens + response.output_tokens,
             "memory_hits": memory_hits,
             "tool_calls_made": tool_calls_made,
+            "retries_made": retry_count,
         }
 
     def _prune_conversation(self) -> None:
