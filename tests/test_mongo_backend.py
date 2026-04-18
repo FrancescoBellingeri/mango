@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import pytest
 
-from mango.integrations.mongodb import (
-    MongoRunner as MongoBackend,
-    _annotate_references,
-    _bson_type_name,
-    _docs_to_dataframe,
-    _infer_fields,
-    _stringify_bson,
-)
+from mango.integrations.mongodb import MongoRunner as MongoBackend
+
+_annotate_references = MongoBackend._annotate_references
+_bson_type_name = MongoBackend._bson_type_name
+_docs_to_dataframe = MongoBackend._docs_to_dataframe
+_infer_fields = MongoBackend._infer_fields
+_stringify_bson = MongoBackend._stringify_bson
 from mango.core.types import FieldInfo, QueryRequest, ValidationError
 
 

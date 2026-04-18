@@ -38,6 +38,7 @@ from mango.integrations import MongoRunner
 from mango.core.types import QueryRequest
 from mango.llm import ToolDef, ToolParam
 from mango.tools.base import Tool, ToolResult
+from mango.tools.validator import MQLValidator
 
 
 # ---------------------------------------------------------------------------
@@ -147,7 +148,8 @@ class DescribeCollectionTool(Tool):
 
     async def execute(self, **kwargs: Any) -> ToolResult:
         collection: str = kwargs["collection"]
-        schema = self._backend._introspect_collection(collection)
+        all_collections = set(self._backend.list_collections())
+        schema = self._backend._introspect_collection(collection, all_collections)
 
         # Serialise FieldInfo list into plain dicts for the LLM.
         def field_to_dict(f: Any) -> dict:
@@ -238,9 +240,15 @@ class CollectionStatsTool(Tool):
 class RunMQLTool(Tool):
     """Execute a MQL query and return results as a JSON-serialisable list."""
 
-    def __init__(self, backend: MongoRunner, max_rows: int = 100) -> None:
+    def __init__(
+        self,
+        backend: MongoRunner,
+        max_rows: int = 100,
+        validate: bool = True,
+    ) -> None:
         self._backend = backend
         self._max_rows = max_rows
+        self._validator: MQLValidator | None = MQLValidator(backend) if validate else None
 
     @property
     def definition(self) -> ToolDef:
@@ -319,16 +327,26 @@ class RunMQLTool(Tool):
             distinct_field=kwargs.get("distinct_field"),
         )
 
+        warnings: list[str] = []
+        if self._validator is not None:
+            validation = self._validator.validate(request)
+            if not validation.valid:
+                return ToolResult(success=False, error=validation.as_tool_error())
+            warnings = validation.warnings
+
         df = self._backend.execute_query(request)
 
         if df.empty:
-            return ToolResult(success=True, data={"rows": [], "row_count": 0})
+            data: dict = {"rows": [], "row_count": 0}
+            if warnings:
+                data["validation_warnings"] = warnings
+            return ToolResult(success=True, data=data)
 
         rows = json.loads(df.to_json(orient="records", date_format="iso", default_handler=str))
-        return ToolResult(
-            success=True,
-            data={"rows": rows, "row_count": len(rows)},
-        )
+        data = {"rows": rows, "row_count": len(rows)}
+        if warnings:
+            data["validation_warnings"] = warnings
+        return ToolResult(success=True, data=data)
 
 
 # ---------------------------------------------------------------------------
@@ -466,12 +484,16 @@ def _group_collections(
 # ---------------------------------------------------------------------------
 
 
-def build_mongo_tools(backend: MongoRunner, max_rows: int = 100) -> list[Tool]:
+def build_mongo_tools(
+    backend: MongoRunner,
+    max_rows: int = 100,
+    validate: bool = True,
+) -> list[Tool]:
     """Return the standard set of MongoDB tools ready to register."""
     return [
         ListCollectionsTool(backend),
         SearchCollectionsTool(backend),
         DescribeCollectionTool(backend),
         CollectionStatsTool(backend),
-        RunMQLTool(backend, max_rows=max_rows),
+        RunMQLTool(backend, max_rows=max_rows, validate=validate),
     ]

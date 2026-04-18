@@ -6,3 +6,7 @@ chroma_db/
 .pytest_cache/
 .venv/
 dist/
+.benchmark_memory/
+data/
+results/
+mango_benchmark/

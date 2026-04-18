@@ -592,7 +592,7 @@ class MemoryEntry:
 
 **Bootstrap:** Users can pre-load the memory with common question-MQL pairs for their domain using the CLI `/train` command or programmatically via `agent.memory.save()`.
 
-**Organic growth:** During normal use, when a query returns correct results and the user confirms (`/save`), the interaction is added to memory.
+**Organic growth:** During normal use, when a query returns correct results, the interaction is automatically added to memory.
 
 **Correction:** If a stored memory is wrong, users can delete it: `/forget <entry_id>`.
 
@@ -621,9 +621,6 @@ Pipeline: [{$match: {created_at: {$gte: ISODate('2026-03-25')}}},
 
 Result: 1,247 orders were placed in the last 7 days.
 
-mango> /save
-Saved to memory.
-
 mango> Show me daily revenue trend for March
 
 [RunMqlTool] Executing aggregate on 'orders'...
@@ -647,7 +644,6 @@ The pipeline works in 4 stages:
 | `/schema` | Display inferred schema for all collections |
 | `/schema <collection>` | Display schema for a specific collection |
 | `/refresh-schema` | Re-run schema introspection |
-| `/save` | Save last interaction to memory |
 | `/forget <id>` | Delete a memory entry |
 | `/memories` | List all stored memories |
 | `/train` | Enter training mode to pre-load question-MQL pairs |
@@ -981,6 +977,28 @@ This section tracks features approved for implementation but not yet built. Each
 - API: `POST /api/v1/ask/export` returns file download
 - The raw `pd.DataFrame` from `execute_query` is already the ideal source — just serialize it
 - Include the original question and generated MQL in the export metadata
+
+---
+
+### 14.11 Ground Truth Validation
+
+**What:** A pre-persist validation step that runs a newly generated query against a small user-maintained set of questions with verified correct answers, blocking memory saves when results diverge from ground truth.
+
+**Why:** `ValidatorTool` catches structural errors (bad operators, missing fields, invalid JSON). It cannot catch semantic errors — a query that aggregates on the wrong field passes every structural check and returns plausible garbage. Without semantic validation, a single plausible-but-wrong query saved to memory poisons future few-shot examples and compounds over time.
+
+**Design decisions:**
+- New `GroundTruthStore` ABC with two methods: `add(question: str, expected: pd.DataFrame | scalar) -> str` and `validate(question: str, actual: pd.DataFrame | scalar) -> ValidationResult`
+- Built-in: `InMemoryGroundTruthStore` (default, lost on restart), `MongoGroundTruthStore` (persisted in a dedicated collection), `JsonFileGroundTruthStore`
+- `ValidationResult` carries: `passed: bool`, `matched: int`, `total: int`, `failures: list[GroundTruthFailure]`
+- Comparison strategy is configurable: exact DataFrame match, numeric tolerance (`rtol`, `atol`), schema-only (shape + dtypes, no values) — different use cases need different tolerance
+- Validation runs inside `AgentMemory.save()` as a pre-persist hook — if `GroundTruthStore` is not configured, step is skipped transparently
+- `MangoAgent(ground_truth=MyStore())` — optional, no-op if omitted
+- CLI: `/ground-truth add` enters interactive mode to record a question + its verified result; `/ground-truth list` shows registered cases; `/ground-truth run` manually triggers full validation suite
+- Drift handling: if database schema evolves and a ground-truth case becomes stale, `ValidationResult` includes a `stale_hint` flag (result shape changed) to prompt the user to update the case rather than silently failing
+- Performance: ground-truth cases are run sequentially before each save; keep the set small (10–30 cases) — document this constraint clearly
+- Scope: validation is per-collection; cases are tagged with `collection_name` so a save to `orders` only runs `orders` ground-truth cases, not the full suite
+
+**Sequencing:** Implement after `ValidatorTool` (14 roadmap). Structural validation (ValidatorTool) runs first; ground-truth validation runs second, only if structural validation passes.
 
 ---
 

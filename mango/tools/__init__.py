@@ -6,6 +6,7 @@ Available tools::
         ListCollectionsTool, SearchCollectionsTool,
         DescribeCollectionTool, CollectionStatsTool, RunMQLTool,
         build_mongo_tools,
+        MQLValidator, ValidationResult,
     )
 """
 
@@ -19,6 +20,7 @@ from mango.tools.mongo_tools import (
 )
 from mango.tools.memory_tools import SearchSavedCorrectToolUsesTool, SaveQuestionToolArgsTool, SaveTextMemoryTool
 from mango.tools.base import Tool, ToolResult, ToolRegistry
+from mango.tools.validator import MQLValidator, ValidationResult
 
 __all__ = [
     "Tool",
@@ -33,4 +35,6 @@ __all__ = [
     "SearchSavedCorrectToolUsesTool",
     "SaveQuestionToolArgsTool",
     "SaveTextMemoryTool",
+    "MQLValidator",
+    "ValidationResult",
 ]
