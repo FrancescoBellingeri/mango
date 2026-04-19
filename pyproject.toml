@@ -35,9 +35,10 @@ mango = "mango.servers.cli.main:main"
 anthropic = ["anthropic==0.89.0"]
 openai = ["openai==2.30.0"]
 gemini = ["google-genai==1.70.0"]
-all = ["anthropic==0.89.0", "openai==2.30.0", "google-genai==1.70.0"]
+ollama = ["ollama>=0.4.0"]
+all = ["anthropic==0.89.0", "openai==2.30.0", "google-genai==1.70.0", "ollama>=0.4.0"]
 test = ["pytest>=7.0.0", "pytest-asyncio>=0.23.0", "pytest-mock>=3.10.0", "pytest-cov>=4.0.0", "mongomock>=4.1.0"]
-dev = ["pytest>=7.0.0", "pytest-asyncio>=0.23.0", "pytest-mock>=3.10.0", "pytest-cov>=4.0.0", "mongomock>=4.1.0", "mypy", "ruff"]
+dev = ["pytest>=7.0.0", "pytest-asyncio>=0.23.0", "pytest-mock>=3.10.0", "pytest-cov>=4.0.0", "mongomock>=4.1.0", "mypy", "ruff", "faker>=25.0.0", "tqdm>=4.0.0"]
 
 [tool.flit.module]
 name = "mango"

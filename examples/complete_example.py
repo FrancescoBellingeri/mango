@@ -12,19 +12,15 @@ from mango.tools import (
     SaveTextMemoryTool,
 )
 from mango.servers.fastapi import MangoFastAPIServer
-from mango.integrations.google import GeminiLlmService
-from mango.integrations.anthropic import AnthropicLlmService
-from mango.integrations.openai import OpenAiLlmService
-from mango.integrations.mongodb import MongoRunner
-from mango.integrations.chromadb import ChromaAgentMemory
+from mango.integrations import GeminiLlmService, AnthropicLlmService, OpenAiLlmService, OllamaLlmService, MongoRunner, ChromaAgentMemory
 from dotenv import load_dotenv
 
 load_dotenv()
 
 # Configure your LLM
-llm = GeminiLlmService(
-    model="gemini-3.1-pro-preview",
-    api_key=os.getenv("GOOGLE_API_KEY"),
+llm = OllamaLlmService(
+    model="qwen3.5:4b",
+    host="http://localhost:11434",
 )
 
 # Configure your database
