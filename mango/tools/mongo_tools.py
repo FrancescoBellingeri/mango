@@ -9,6 +9,7 @@ Tools defined here:
     - describe_collection: schema + indexes + sample docs for one collection
     - collection_stats   : document counts for all collections, sorted descending
     - run_mql            : execute a MQL query (find / aggregate / count / distinct)
+    - explain_query      : explain a query step-by-step with execution stats
 """
 
 from __future__ import annotations
@@ -355,6 +356,119 @@ class RunMQLTool(Tool):
 
 
 # ---------------------------------------------------------------------------
+# explain_query
+# ---------------------------------------------------------------------------
+
+
+class ExplainQueryTool(Tool):
+    """Explain a MQL query step-by-step with optional MongoDB execution stats."""
+
+    def __init__(self, backend: MongoRunner, validate: bool = True) -> None:
+        self._backend = backend
+        self._validator: MQLValidator | None = MQLValidator(backend) if validate else None
+
+    @property
+    def definition(self) -> ToolDef:
+        return ToolDef(
+            name="explain_query",
+            description=(
+                "Explain what a MongoDB query does and how MongoDB would execute it. "
+                "Returns a plain-language breakdown of each pipeline stage or filter, "
+                "plus execution statistics (documents examined, index used, time in ms) "
+                "when available. "
+                "Use this when the user asks to 'explain', 'describe step by step', "
+                "'show the query plan', 'walk me through', 'how does this query work?', "
+                "'what did you do?', 'why did I get these results?', or 'is this query using an index?'. "
+                "Prefer this tool over run_mql when the user wants an explanation rather than raw results."
+            ),
+            params=[
+                ToolParam(
+                    name="operation",
+                    type="string",
+                    description="Query operation type.",
+                    enum=["find", "aggregate", "count", "distinct"],
+                ),
+                ToolParam(
+                    name="collection",
+                    type="string",
+                    description="Name of the target collection.",
+                ),
+                ToolParam(
+                    name="filter",
+                    type="object",
+                    description="MongoDB filter document (for find/count/distinct).",
+                    required=False,
+                ),
+                ToolParam(
+                    name="pipeline",
+                    type="array",
+                    description=(
+                        "Aggregation pipeline stages. "
+                        "REQUIRED when operation is 'aggregate' — must be a non-empty list. "
+                        "Omit for find/count/distinct."
+                    ),
+                    required=False,
+                    items={"type": "object"},
+                ),
+                ToolParam(
+                    name="projection",
+                    type="object",
+                    description="Fields to include/exclude (for find).",
+                    required=False,
+                ),
+                ToolParam(
+                    name="sort",
+                    type="object",
+                    description='Sort specification, e.g. {"created_at": -1}.',
+                    required=False,
+                ),
+                ToolParam(
+                    name="distinct_field",
+                    type="string",
+                    description="Field name for distinct operation.",
+                    required=False,
+                ),
+            ],
+        )
+
+    async def execute(self, **kwargs: Any) -> ToolResult:
+        request = QueryRequest(
+            operation=kwargs["operation"],
+            collection=kwargs["collection"],
+            filter=_coerce_dates(kwargs.get("filter")),
+            pipeline=_coerce_dates(_parse_json_arg(kwargs.get("pipeline"))),
+            projection=kwargs.get("projection"),
+            sort=kwargs.get("sort"),
+            distinct_field=kwargs.get("distinct_field"),
+        )
+
+        if self._validator is not None:
+            validation = self._validator.validate(request)
+            if not validation.valid:
+                return ToolResult(success=False, error=validation.as_tool_error())
+
+        # Stage-by-stage logical description (derived from structure, no DB call).
+        stages = _describe_request(request)
+
+        # Execution stats from MongoDB .explain() — best-effort, not all backends support it.
+        exec_stats: dict = {}
+        try:
+            exec_stats = _run_explain(self._backend, request)
+        except Exception:
+            pass
+
+        data: dict = {
+            "collection": request.collection,
+            "operation": request.operation,
+            "stages": stages,
+        }
+        if exec_stats:
+            data["execution_stats"] = exec_stats
+
+        return ToolResult(success=True, data=data)
+
+
+# ---------------------------------------------------------------------------
 # Helper
 # ---------------------------------------------------------------------------
 
@@ -420,6 +534,224 @@ def _parse_iso(value: Any) -> datetime | None:
         except ValueError:
             continue
     return None
+
+
+# ---------------------------------------------------------------------------
+# Explain helpers
+# ---------------------------------------------------------------------------
+
+
+def _describe_request(request: QueryRequest) -> list[dict]:
+    """Return a plain-language description of each logical step in *request*."""
+    stages: list[dict] = []
+
+    if request.operation in ("find", "count"):
+        if request.filter:
+            stages.append({
+                "step": "filter",
+                "description": f"Filter where: {json.dumps(request.filter, default=str)}",
+            })
+        else:
+            stages.append({"step": "filter", "description": "No filter — all documents"})
+
+        if request.sort:
+            parts = [f"{k} {'desc' if v == -1 else 'asc'}" for k, v in request.sort.items()]
+            stages.append({"step": "sort", "description": f"Sort: {', '.join(parts)}"})
+
+        if request.projection:
+            included = [k for k, v in request.projection.items() if v and k != "_id"]
+            excluded = [k for k, v in request.projection.items() if not v]
+            if included:
+                stages.append({"step": "projection", "description": f"Return fields: {', '.join(included)}"})
+            elif excluded:
+                stages.append({"step": "projection", "description": f"Exclude fields: {', '.join(excluded)}"})
+
+        if request.operation == "count":
+            stages.append({"step": "count", "description": "Count matching documents"})
+
+    elif request.operation == "distinct":
+        stages.append({
+            "step": "distinct",
+            "description": f"Unique values of '{request.distinct_field}'"
+            + (f" where: {json.dumps(request.filter, default=str)}" if request.filter else ""),
+        })
+
+    elif request.operation == "aggregate" and request.pipeline:
+        for i, stage in enumerate(request.pipeline):
+            if not isinstance(stage, dict) or len(stage) != 1:
+                stages.append({"step": f"stage_{i}", "description": str(stage)})
+                continue
+            op = next(iter(stage))
+            body = stage[op]
+            stages.append({"step": op, "description": _describe_stage(op, body)})
+
+    return stages
+
+
+def _describe_stage(op: str, body: Any) -> str:
+    """Return a one-line plain-language description of a single pipeline stage."""
+    if op == "$match":
+        return f"Filter: {json.dumps(body, default=str)}"
+
+    if op == "$group":
+        id_expr = json.dumps(body.get("_id"), default=str)
+        computed = [k for k in body if k != "_id"]
+        desc = f"Group by {id_expr}"
+        if computed:
+            desc += f", compute: {', '.join(computed)}"
+        return desc
+
+    if op == "$sort":
+        if isinstance(body, dict):
+            parts = [f"{k} {'desc' if v == -1 else 'asc'}" for k, v in body.items()]
+            return f"Sort: {', '.join(parts)}"
+        return f"Sort: {body}"
+
+    if op == "$limit":
+        return f"Keep first {body} documents"
+
+    if op == "$skip":
+        return f"Skip {body} documents"
+
+    if op == "$project":
+        if isinstance(body, dict):
+            included = [k for k, v in body.items() if v and k != "_id"]
+            excluded = [k for k, v in body.items() if not v]
+            if included:
+                return f"Return fields: {', '.join(included)}"
+            if excluded:
+                return f"Exclude fields: {', '.join(excluded)}"
+        return f"Project: {json.dumps(body, default=str)[:100]}"
+
+    if op in ("$addFields", "$set"):
+        fields = list(body.keys()) if isinstance(body, dict) else []
+        return f"Add/compute fields: {', '.join(fields)}"
+
+    if op in ("$unset", "$project"):
+        fields = body if isinstance(body, list) else [body]
+        return f"Remove fields: {', '.join(str(f) for f in fields)}"
+
+    if op == "$unwind":
+        field = body if isinstance(body, str) else body.get("path", str(body))
+        preserve = body.get("preserveNullAndEmptyArrays", False) if isinstance(body, dict) else False
+        desc = f"Expand array: {field}"
+        if preserve:
+            desc += " (keep nulls)"
+        return desc
+
+    if op == "$lookup":
+        if isinstance(body, dict):
+            return (
+                f"Join '{body.get('from')}' on "
+                f"{body.get('localField')} → {body.get('foreignField')}"
+                + (f", as '{body.get('as')}'" if body.get("as") else "")
+            )
+
+    if op == "$count":
+        return f"Count documents → '{body}'"
+
+    if op == "$sample":
+        size = body.get("size") if isinstance(body, dict) else body
+        return f"Random sample of {size} documents"
+
+    if op == "$bucket":
+        if isinstance(body, dict):
+            return f"Bucket '{body.get('groupBy')}' by boundaries {body.get('boundaries')}"
+
+    if op == "$facet":
+        if isinstance(body, dict):
+            return f"Multi-facet analysis: {', '.join(body.keys())}"
+
+    if op in ("$out", "$merge"):
+        into = body.get("into", body) if isinstance(body, dict) else body
+        return f"Write results to '{into}'"
+
+    if op in ("$replaceRoot", "$replaceWith"):
+        return f"Replace root document with: {json.dumps(body, default=str)[:80]}"
+
+    if op == "$sortByCount":
+        return f"Sort by count of '{body}'"
+
+    # Fallback for any other stage
+    return f"{op}: {json.dumps(body, default=str)[:100]}"
+
+
+def _run_explain(backend: MongoRunner, request: QueryRequest) -> dict:
+    """Run MongoDB .explain() and return a normalised stats dict.
+
+    Returns an empty dict when the backend does not support explain
+    (e.g. mongomock) or when the operation is not supported.
+    """
+    db = backend._database
+    col = db[request.collection]
+
+    try:
+        if request.operation in ("find", "count"):
+            cursor = col.find(request.filter or {})
+            if request.sort:
+                cursor = cursor.sort(list(request.sort.items()))
+            raw = cursor.explain("executionStats")
+
+        elif request.operation == "aggregate":
+            raw = db.command(
+                "aggregate",
+                request.collection,
+                pipeline=request.pipeline,
+                explain=True,
+                cursor={},
+            )
+
+        elif request.operation == "distinct":
+            raw = db.command(
+                "distinct",
+                request.collection,
+                key=request.distinct_field or "",
+                query=request.filter or {},
+                explain=True,
+            )
+
+        else:
+            return {}
+
+    except Exception:
+        return {}
+
+    return _parse_explain(raw)
+
+
+def _parse_explain(raw: dict) -> dict:
+    """Extract useful fields from a raw MongoDB explain document."""
+    stats: dict = {}
+
+    exec_stats = raw.get("executionStats", {})
+    if exec_stats:
+        for key, alias in (
+            ("nReturned", "docs_returned"),
+            ("totalDocsExamined", "docs_examined"),
+            ("totalKeysExamined", "keys_examined"),
+            ("executionTimeMillis", "execution_time_ms"),
+        ):
+            val = exec_stats.get(key)
+            if val is not None:
+                stats[alias] = val
+
+        # Scan type from the winning plan (IXSCAN / COLLSCAN / etc.)
+        winning_plan = raw.get("queryPlanner", {}).get("winningPlan", {})
+        scan_stage = winning_plan.get("inputStage", winning_plan)
+        scan_type = scan_stage.get("stage", "")
+        if scan_type:
+            stats["scan_type"] = scan_type
+            if scan_type == "IXSCAN":
+                key_pattern = scan_stage.get("keyPattern")
+                if key_pattern:
+                    stats["index_used"] = str(key_pattern)
+
+    # Aggregate explain has a "stages" list instead of executionStats.
+    agg_stages = raw.get("stages")
+    if agg_stages and not stats:
+        stats["pipeline_stages_executed"] = len(agg_stages)
+
+    return stats
 
 
 # ---------------------------------------------------------------------------

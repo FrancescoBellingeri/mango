@@ -770,6 +770,52 @@ pip install mango-ai[all]         # everything
 
 ---
 
+### Weekly Delivery Schedule
+
+Granular week-by-week plan for social updates and incremental releases.
+
+**Blocco 1 — Reliability (settimane 1–3)**
+
+| Settimana | Feature | LinkedIn angle |
+|-----------|---------|----------------|
+| 1 ✓ | **ValidatorTool** — validazione strutturale pre-esecuzione | "Mango now catches bad queries before they hit your database" |
+| 2 ✓ | **Error Recovery** — retry-with-error, max 2 tentativi, LLM si auto-corregge | "Mango self-corrects when it makes a mistake" |
+| 3 | **ExplainQueryTool** — spiegazione step-by-step della pipeline in linguaggio naturale | "Understand exactly what Mango is doing under the hood" |
+
+**Blocco 2 — Memory quality (settimane 4–5)**
+
+| Settimana | Feature | LinkedIn angle |
+|-----------|---------|----------------|
+| 4 | **Memory export/import + `/train`** — pre-carica knowledge in bulk | "Train Mango on your domain before it even sees a question" |
+| 5 | **Ground Truth Validation** — blocca save se risultato diverge dal ground truth | "Mango validates its own memory before it learns" |
+
+**Blocco 3 — Developer experience (settimane 6–8)**
+
+| Settimana | Feature | LinkedIn angle |
+|-----------|---------|----------------|
+| 6 | **Custom System Prompt** — suffix statico + context per-turn | "Customize Mango for your exact deployment" |
+| 7 | **Result Export** — CSV/JSON/Excel da CLI e API | "Take your MongoDB data anywhere" |
+| 8 | **VisualizeDataTool** — bar/line/pie/scatter da CLI e stream SSE | "Mango can now chart your data" |
+
+**Blocco 4 — Production readiness (settimane 9–13)**
+
+| Settimana | Feature | LinkedIn angle |
+|-----------|---------|----------------|
+| 9 | **Collection Access Control** — whitelist/blacklist per agent | "Production-grade security for multi-tenant deployments" |
+| 10 | **Custom Middleware** — cache TTL, rate limiting sull'ToolRegistry | "Add caching and rate limiting without touching tool code" |
+| 11 | **Conversation Persistence** — sessioni sopravvivono ai restart | "Long-running analyses that survive server restarts" |
+| 12 | **Observability** — eventi strutturati, OTel-ready | "Monitor Mango in production with OpenTelemetry" |
+| 13 | **Audit Logging** — JSONL append-only, tamper-evident | "Mango for finance and healthcare — immutable audit trail" |
+
+**Blocco 5 — Expansion (settimane 14+)**
+
+| Settimana | Feature | LinkedIn angle |
+|-----------|---------|----------------|
+| 14 | **Multi-Database Support** — un agent, N database | "Query your entire data landscape in one conversation" |
+| 15+ | **Atlas Vector Search**, Redis, Cassandra, DynamoDB | "Mango beyond MongoDB" |
+
+---
+
 ## 13. Conventions for Claude Code
 
 > This section is specifically for Claude Code (or any AI coding assistant) working on Mango. Follow these conventions strictly.

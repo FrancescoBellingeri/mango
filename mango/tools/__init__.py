@@ -13,6 +13,7 @@ Available tools::
 from mango.tools.mongo_tools import (
     CollectionStatsTool,
     DescribeCollectionTool,
+    ExplainQueryTool,
     ListCollectionsTool,
     RunMQLTool,
     SearchCollectionsTool,
@@ -31,6 +32,7 @@ __all__ = [
     "DescribeCollectionTool",
     "CollectionStatsTool",
     "RunMQLTool",
+    "ExplainQueryTool",
     "build_mongo_tools",
     "SearchSavedCorrectToolUsesTool",
     "SaveQuestionToolArgsTool",
