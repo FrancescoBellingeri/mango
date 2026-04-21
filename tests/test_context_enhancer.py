@@ -243,8 +243,7 @@ class TestMultipleMemoryEntries:
 
         system_prompt = llm.calls[0]["system_prompt"]
         if "Similar past interactions" in system_prompt:
-            # If at least one example was retrieved, Example 1 must be present.
-            assert "Example 1" in system_prompt
+            assert "Q:" in system_prompt
 
 
 # ---------------------------------------------------------------------------

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from mango.memory.models import MemoryEntry, TextMemoryEntry
+from mango.memory.models import MemoryEntry, TextMemoryEntry, TrainingEntry
 from mango.integrations.chromadb import make_entry_id
 
 
@@ -145,6 +145,93 @@ class TestTextMemory:
         await memory_service.store(_make_entry())
         await memory_service.save_text("some text note")
         assert memory_service.count() == 1  # only tool entry counted
+
+
+# ---------------------------------------------------------------------------
+# Training collection
+# ---------------------------------------------------------------------------
+
+
+def _make_training_entry(
+    question: str = "How many active users?",
+    tool_name: str = "run_mql",
+    tool_args: dict | None = None,
+    result_summary: str = "42 active users.",
+) -> TrainingEntry:
+    return TrainingEntry(
+        id=make_entry_id(),
+        question=question,
+        tool_name=tool_name,
+        tool_args=tool_args or {"operation": "count", "collection": "users"},
+        result_summary=result_summary,
+    )
+
+
+class TestTrainingCollection:
+    async def test_training_count_starts_zero(self, memory_service):
+        assert memory_service.training_count() == 0
+
+    async def test_train_increases_count(self, memory_service):
+        await memory_service.train(_make_training_entry())
+        assert memory_service.training_count() == 1
+
+    async def test_training_independent_from_tool_count(self, memory_service):
+        await memory_service.train(_make_training_entry())
+        assert memory_service.count() == 0
+
+    async def test_get_training_entries_empty(self, memory_service):
+        results = await memory_service.get_training_entries("how many users?")
+        assert results == []
+
+    async def test_get_training_entries_finds_similar(self, memory_service):
+        await memory_service.train(_make_training_entry(question="Count active users in the system"))
+        results = await memory_service.get_training_entries(
+            "how many active users?", similarity_threshold=0.0
+        )
+        assert len(results) >= 1
+        assert results[0].tool_name == "run_mql"
+
+    async def test_training_entry_fields_round_trip(self, memory_service):
+        args = {"operation": "count", "collection": "orders", "filter": {"status": "open"}}
+        entry = _make_training_entry(tool_args=args, result_summary="17 open orders.")
+        await memory_service.train(entry)
+        results = await memory_service.get_training_entries(
+            "open orders count", similarity_threshold=0.0
+        )
+        assert len(results) == 1
+        assert results[0].tool_args == args
+        assert results[0].result_summary == "17 open orders."
+
+    async def test_train_upsert_same_id(self, memory_service):
+        entry = _make_training_entry()
+        await memory_service.train(entry)
+        await memory_service.train(entry)
+        assert memory_service.training_count() == 1
+
+    async def test_export_includes_training_type(self, memory_service):
+        await memory_service.train(_make_training_entry())
+        entries = await memory_service.export_all()
+        training = [e for e in entries if e["type"] == "training"]
+        assert len(training) == 1
+
+    async def test_export_import_round_trip(self, memory_service):
+        from mango.integrations.chromadb import ChromaAgentMemory
+
+        await memory_service.train(_make_training_entry(question="Q1"))
+        await memory_service.save_text("revenue = total_amount")
+
+        exported = await memory_service.export_all()
+        assert len(exported) == 2
+
+        fresh = ChromaAgentMemory(persist_dir=":memory:")
+        imported = await fresh.import_all(exported)
+        assert imported == 2
+        assert fresh.training_count() == 1
+
+    async def test_import_skips_unknown_type(self, memory_service):
+        bad = [{"type": "unknown", "question": "x"}]
+        imported = await memory_service.import_all(bad)
+        assert imported == 0
 
 
 # ---------------------------------------------------------------------------

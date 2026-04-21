@@ -31,3 +31,20 @@ class TextMemoryEntry:
     id: str
     text: str
     similarity: float = 0.0  # filled in by search_text()
+
+
+@dataclass
+class TrainingEntry:
+    """A verified (question → tool_args) pair used as gold-standard few-shot example.
+
+    Unlike MemoryEntry (auto-saved), TrainingEntry is explicitly loaded by the
+    user via /train and never overwritten by auto-save logic.
+    """
+
+    id: str
+    question: str
+    tool_name: str
+    tool_args: dict
+    result_summary: str = ""
+    similarity: float = 0.0  # filled in by get_training_entries()
+    timestamp: str = field(default_factory=lambda: datetime.now().isoformat())

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+
 class AskRequest(BaseModel):
     question: str = Field(..., description="Natural language question")
     session_id: str | None = Field(
@@ -12,6 +13,23 @@ class AskRequest(BaseModel):
                     "Omit to start a new one.",
     )
 
+
 class HealthResponse(BaseModel):
     status: str
     service: str
+
+
+class TrainRequest(BaseModel):
+    question: str
+    tool_name: str
+    tool_args: dict = Field(default_factory=dict)
+    result_summary: str = ""
+
+
+class TrainResponse(BaseModel):
+    imported: int
+
+
+class ExportResponse(BaseModel):
+    entries: list[dict]
+    count: int

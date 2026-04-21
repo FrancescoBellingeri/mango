@@ -7,11 +7,12 @@ Tools defined here:
     - search_saved_correct_tool_uses : search memory for similar past interactions
     - save_question_tool_args        : save a successful (question → tool call) pair
     - save_text_memory               : save free-form text (schema notes, business context)
+    - delete_last_memory_entry       : delete the last auto-saved entry (user feedback)
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 from mango.integrations.chromadb import make_entry_id
 from mango.llm import ToolDef, ToolParam
@@ -49,7 +50,7 @@ class SearchSavedCorrectToolUsesTool(Tool):
             entries = await self._memory.retrieve(
                 question=kwargs["question"],
                 top_k=5,
-                similarity_threshold=0.5,
+                similarity_threshold=0.6,
             )
             if not entries:
                 return ToolResult(success=True, data={"results": [], "count": 0})
@@ -154,5 +155,41 @@ class SaveTextMemoryTool(Tool):
         try:
             entry_id = await self._memory.save_text(kwargs["content"])
             return ToolResult(success=True, data={"saved_id": entry_id})
+        except Exception as exc:
+            return ToolResult(success=False, error=str(exc))
+
+
+class DeleteLastMemoryEntryTool(Tool):
+    """Let the LLM delete the last auto-saved memory entry on user request.
+
+    Wire this up after creating the agent:
+        tools.register(DeleteLastMemoryEntryTool(memory, lambda: agent._last_memory_entry_id))
+    """
+
+    def __init__(self, memory: MemoryService, get_last_id: Callable[[], str | None]) -> None:
+        self._memory = memory
+        self._get_last_id = get_last_id
+
+    @property
+    def definition(self) -> ToolDef:
+        return ToolDef(
+            name="delete_last_memory_entry",
+            description=(
+                "Delete the last query that was automatically saved to memory. "
+                "Call this when the user says the last result was wrong, incorrect, "
+                "or asks to forget/remove it (e.g. 'that was wrong', 'delete that', "
+                "'forget the last query', 'don't save that'). "
+                "Do NOT call this unless the user explicitly asks to remove it."
+            ),
+            params=[],
+        )
+
+    async def execute(self, **kwargs: Any) -> ToolResult:
+        entry_id = self._get_last_id()
+        if entry_id is None:
+            return ToolResult(success=False, error="No memory entry to delete from this session.")
+        try:
+            await self._memory.delete(entry_id)
+            return ToolResult(success=True, data={"deleted_id": entry_id})
         except Exception as exc:
             return ToolResult(success=False, error=str(exc))

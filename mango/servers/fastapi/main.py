@@ -16,8 +16,6 @@ from __future__ import annotations
 
 import logging
 import os
-from contextlib import asynccontextmanager
-
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -38,10 +36,7 @@ class MangoFastAPIServer:
                       Defaults to the MANGO_CORS_ORIGINS env var or '*'.
     """
 
-    def __init__(
-        self,
-        agent: MangoAgent
-    ) -> None:
+    def __init__(self, agent: MangoAgent) -> None:
         self._agent = agent
         self._app = self._build_app()
 
@@ -79,4 +74,5 @@ class MangoFastAPIServer:
 
         app.include_router(router, prefix="/api/v1")
         app.state.agent = self._agent
+
         return app

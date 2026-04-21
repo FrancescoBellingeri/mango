@@ -128,6 +128,7 @@ class MangoAgent:
         max_iterations: int = 8,
         max_retries: int = 2,
         memory_top_k: int = 3,
+        training_top_k: int = 3,
         max_turns: int = 5,
     ) -> None:
         self._llm = llm_service
@@ -139,10 +140,12 @@ class MangoAgent:
         self._max_iterations = max_iterations
         self._max_retries = max_retries
         self._memory_top_k = memory_top_k
+        self._training_top_k = training_top_k
         self._max_turns = max_turns
         self._system_prompt: str = ""
         self._conversation: list[Message] = []
         self._ready: bool = False
+        self._last_memory_entry_id: str | None = None
 
     # ------------------------------------------------------------------
     # Properties
@@ -205,6 +208,7 @@ class MangoAgent:
             max_iterations=self._max_iterations,
             max_retries=self._max_retries,
             memory_top_k=self._memory_top_k,
+            training_top_k=self._training_top_k,
             max_turns=self._max_turns,
         )
         agent._system_prompt = self._system_prompt
@@ -275,14 +279,11 @@ class MangoAgent:
             if event["type"] == "tool_call":
                 yield {"type": "tool_call", "tool_name": event["tool_name"], "tool_args": event["tool_args"]}
             elif event["type"] == "tool_result":
-                preview = event["result_text"]
-                if len(preview) > 200:
-                    preview = preview[:200] + "…"
                 yield {
                     "type": "tool_result",
                     "tool_name": event["tool_name"],
                     "success": event["success"],
-                    "preview": preview,
+                    "preview": event["result_text"],
                 }
             elif event["type"] == "answer":
                 self._prune_conversation()
@@ -326,15 +327,37 @@ class MangoAgent:
         memory_context = ""
 
         if self._memory is not None:
+            sections: list[str] = []
+
+            training_entries = await self._memory.get_training_entries(
+                question, top_k=self._training_top_k
+            )
+            if training_entries:
+                lines = [
+                    "## VERIFIED TRAINING EXAMPLES — use these directly without additional exploration.\n"
+                    "If a training example matches the question, call the tool with those exact args.\n"
+                    "Do NOT call describe_collection or search_collection when a training example already covers the question.\n"
+                ]
+                for e in training_entries:
+                    lines.append(f"Q: {e.question}")
+                    lines.append(f"Tool: {e.tool_name} | Args: {e.tool_args}")
+                    if e.result_summary:
+                        lines.append(f"Result: {e.result_summary}")
+                    lines.append("")
+                sections.append("\n".join(lines))
+
             entries = await self._memory.retrieve(question, top_k=self._memory_top_k)
             if entries:
                 memory_hits = len(entries)
-                lines = ["## Relevant past interactions\n"]
+                lines = ["## Similar past interactions\n"]
                 for e in entries:
                     lines.append(f"Q: {e.question}")
                     lines.append(f"Tool: {e.tool_name} | Args: {e.tool_args}")
                     lines.append(f"Result: {e.result_summary}\n")
-                memory_context = "\n".join(lines) + "\n\n"
+                sections.append("\n".join(lines))
+
+            if sections:
+                memory_context = "\n\n".join(sections) + "\n\n"
 
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S UTC")
         system_prompt = f"Current datetime: {now}\n\n{memory_context}{self._system_prompt}"
@@ -419,9 +442,9 @@ class MangoAgent:
                 logger.debug("Tool result (%s): %.200s…", tc.tool_name, result_text)
 
                 if result.success:
-                    retry_count = 0
                     if tc.tool_name not in _MEMORY_TOOL_NAMES:
                         await self._auto_store_memory(question, tc.tool_name, tc.tool_args, result_text)
+                    retry_count = 0
                 else:
                     error_msg = result.error or result_text
                     if _is_retryable(error_msg) and retry_count < self._max_retries:
@@ -497,6 +520,7 @@ class MangoAgent:
         """Automatically persist a successful tool call to memory."""
         if self._memory is None:
             return
+
         entry = MemoryEntry(
             id=make_entry_id(),
             question=question,
@@ -504,8 +528,10 @@ class MangoAgent:
             tool_args=tool_args,
             result_summary=result_text[:300],
         )
+
         try:
             await self._memory.store(entry)
+            self._last_memory_entry_id = entry.id
             logger.info("Auto-saved memory entry: %s(%s)", tool_name, str(tool_args)[:60])
         except Exception as exc:
             logger.warning("Failed to auto-save memory entry: %s", exc)

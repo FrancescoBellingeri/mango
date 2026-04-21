@@ -242,7 +242,7 @@ const SUGGESTIONS = [
                 </span>
                 <div class="min-w-0">
                   <span style="color: #888;">{{ step.name }}</span>
-                  <span v-if="step.preview" class="block truncate mt-0.5" style="color: #444;">{{ step.preview }}</span>
+                  <span v-if="step.preview" class="block mt-0.5 whitespace-pre-wrap break-words" style="color: #444;">{{ step.preview }}</span>
                 </div>
               </div>
             </div>

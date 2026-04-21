@@ -10,7 +10,7 @@ All I/O methods are async so implementations can offload blocking work
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from mango.memory.models import MemoryEntry, TextMemoryEntry
+from mango.memory.models import MemoryEntry, TextMemoryEntry, TrainingEntry
 
 
 class MemoryService(ABC):
@@ -93,6 +93,51 @@ class MemoryService(ABC):
 
         Returns:
             List of TextMemoryEntry sorted by similarity.
+        """
+
+    # ------------------------------------------------------------------
+    # Training (gold-standard examples)
+    # ------------------------------------------------------------------
+
+    @abstractmethod
+    async def train(self, entry: TrainingEntry) -> None:
+        """Persist a verified training entry.
+
+        Training entries are gold-standard examples loaded by the user.
+        They are never overwritten by the auto-save logic.
+        """
+
+    @abstractmethod
+    async def get_training_entries(
+        self,
+        question: str,
+        top_k: int = 5,
+        similarity_threshold: float = 0.5,
+    ) -> list[TrainingEntry]:
+        """Return the top_k training entries most similar to question."""
+
+    @abstractmethod
+    def training_count(self) -> int:
+        """Return the total number of stored training entries."""
+
+    # ------------------------------------------------------------------
+    # Export / Import
+    # ------------------------------------------------------------------
+
+    @abstractmethod
+    async def export_all(self) -> list[dict]:
+        """Export all stored entries (tool-usage, text, training) as plain dicts.
+
+        Each dict has a ``"type"`` key: ``"tool"``, ``"text"``, or ``"training"``.
+        Suitable for serialisation to JSONL.
+        """
+
+    @abstractmethod
+    async def import_all(self, entries: list[dict]) -> int:
+        """Import entries exported by export_all().
+
+        Returns:
+            Number of entries successfully imported.
         """
 
     # ------------------------------------------------------------------

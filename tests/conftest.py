@@ -168,7 +168,11 @@ def memory_service():
     """
     svc = ChromaMemoryService(persist_dir=":memory:")
     # Wipe any data left by previous tests (singleton client).
-    for col_name in (_CHROMA_COLLECTION, f"{_CHROMA_COLLECTION}_text"):
+    for col_name in (
+        _CHROMA_COLLECTION,
+        f"{_CHROMA_COLLECTION}_text",
+        f"{_CHROMA_COLLECTION}_training",
+    ):
         try:
             svc._client.delete_collection(col_name)
         except Exception:
@@ -179,6 +183,10 @@ def memory_service():
     )
     svc._text_collection = svc._client.get_or_create_collection(
         name=f"{_CHROMA_COLLECTION}_text",
+        metadata={"hnsw:space": "cosine"},
+    )
+    svc._training_collection = svc._client.get_or_create_collection(
+        name=f"{_CHROMA_COLLECTION}_training",
         metadata={"hnsw:space": "cosine"},
     )
     return svc
