@@ -44,13 +44,13 @@ def build_llm(
         return AnthropicLlmService(**kwargs)
 
     if provider == "openai":
-        from mango.integrations.openai import OpenAiLlmService
+        from mango.integrations.openai import OpenAILlmService
         kwargs = {}
         if model:
             kwargs["model"] = model
         if api_key:
             kwargs["api_key"] = api_key
-        return OpenAiLlmService(**kwargs)
+        return OpenAILlmService(**kwargs)
 
     if provider == "gemini":
         from mango.integrations.google import GeminiLlmService

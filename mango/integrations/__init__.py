@@ -5,7 +5,7 @@ clean, consistent class name. Import from here in user scripts:
 
     from mango.integrations.google import GeminiLlmService
     from mango.integrations.anthropic import AnthropicLlmService
-    from mango.integrations.openai import OpenAiLlmService
+    from mango.integrations.openai import OpenAILlmService
     from mango.integrations.ollama import OllamaLlmService
     from mango.integrations.mongodb import MongoBackend
     from mango.integrations.chromadb import ChromaAgentMemory
@@ -15,7 +15,7 @@ from .mongodb import MongoRunner
 from .chromadb import ChromaAgentMemory
 from .google import GeminiLlmService
 from .anthropic import AnthropicLlmService
-from .openai import OpenAiLlmService
+from .openai import OpenAILlmService
 from .ollama import OllamaLlmService
 
 __all__ = [
@@ -23,6 +23,6 @@ __all__ = [
     "ChromaAgentMemory",
     "GeminiLlmService",
     "AnthropicLlmService",
-    "OpenAiLlmService",
+    "OpenAILlmService",
     "OllamaLlmService",
 ]

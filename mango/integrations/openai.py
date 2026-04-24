@@ -7,7 +7,7 @@ import json
 from mango.llm import LLMResponse, LLMService, Message, ToolCall, ToolDef, ToolParam
 
 
-class OpenAiLlmService(LLMService):
+class OpenAILlmService(LLMService):
     """LLMService backed by OpenAI.
 
     Args:
@@ -23,6 +23,7 @@ class OpenAiLlmService(LLMService):
         api_key: str | None = None,
         model: str = DEFAULT_MODEL,
         max_completion_tokens: int = 4096,
+        base_url: str | None = None,
     ) -> None:
         try:
             import openai
@@ -30,7 +31,7 @@ class OpenAiLlmService(LLMService):
             raise ImportError(
                 "openai package is not installed. Run: pip install mango-ai[openai]"
             )
-        self._client = openai.OpenAI(api_key=api_key)
+        self._client = openai.OpenAI(api_key=api_key, base_url=base_url)
         self._model = model
         self._max_completion_tokens = max_completion_tokens
 
@@ -62,7 +63,7 @@ class OpenAiLlmService(LLMService):
                 "function": {
                     "name": t.name,
                     "description": t.description,
-                    "parameters": OpenAiLlmService._build_parameters(t.params),
+                    "parameters": OpenAILlmService._build_parameters(t.params),
                 },
             }
             for t in tools

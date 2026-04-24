@@ -13,13 +13,13 @@ from mango.tools import (
     DeleteLastMemoryEntryTool,
 )
 from mango.servers.fastapi import MangoFastAPIServer
-from mango.integrations import GeminiLlmService, AnthropicLlmService, OpenAiLlmService, OllamaLlmService, MongoRunner, ChromaAgentMemory
+from mango.integrations import GeminiLlmService, AnthropicLlmService, OpenAILlmService, OllamaLlmService, MongoRunner, ChromaAgentMemory
 from dotenv import load_dotenv
 
 load_dotenv()
 
 # Configure your LLM
-llm = OpenAiLlmService(
+llm = OpenAILlmService(
     model="gpt-5.4",
     api_key=os.getenv("OPENAI_API_KEY"),
 )

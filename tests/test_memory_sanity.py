@@ -243,16 +243,16 @@ class TestLLMProviderModules:
     """Each provider module must export its service class."""
 
     def test_openai_service_import(self):
-        from mango.integrations.openai import OpenAiLlmService as OpenAIService
+        from mango.integrations.openai import OpenAILlmService as OpenAIService
         assert OpenAIService is not None
 
     def test_openai_implements_llm_service(self):
         from mango.llm.base import LLMService
-        from mango.integrations.openai import OpenAiLlmService as OpenAIService
+        from mango.integrations.openai import OpenAILlmService as OpenAIService
         assert issubclass(OpenAIService, LLMService)
 
     def test_openai_has_default_model(self):
-        from mango.integrations.openai import OpenAiLlmService as OpenAIService
+        from mango.integrations.openai import OpenAILlmService as OpenAIService
         assert hasattr(OpenAIService, "DEFAULT_MODEL")
         assert isinstance(OpenAIService.DEFAULT_MODEL, str)
 
@@ -275,7 +275,7 @@ class TestLLMProviderModules:
         assert issubclass(GeminiService, LLMService)
 
     def test_all_providers_have_chat_method(self):
-        from mango.integrations.openai import OpenAiLlmService as OpenAIService
+        from mango.integrations.openai import OpenAILlmService as OpenAIService
         from mango.integrations.anthropic import AnthropicLlmService as AnthropicService
         from mango.integrations.google import GeminiLlmService as GeminiService
         for cls in (OpenAIService, AnthropicService, GeminiService):
@@ -285,7 +285,7 @@ class TestLLMProviderModules:
             )
 
     def test_all_providers_have_get_model_name_method(self):
-        from mango.integrations.openai import OpenAiLlmService as OpenAIService
+        from mango.integrations.openai import OpenAILlmService as OpenAIService
         from mango.integrations.anthropic import AnthropicLlmService as AnthropicService
         from mango.integrations.google import GeminiLlmService as GeminiService
         for cls in (OpenAIService, AnthropicService, GeminiService):
@@ -319,7 +319,7 @@ class TestLLMFactory:
 
     def test_openai_returns_service(self):
         from mango.llm.factory import build_llm
-        from mango.integrations.openai import OpenAiLlmService as OpenAIService
+        from mango.integrations.openai import OpenAILlmService as OpenAIService
         # api_key=None is fine — the service stores it, doesn't validate at init.
         svc = build_llm(provider="openai", api_key="test-key")
         assert isinstance(svc, OpenAIService)
