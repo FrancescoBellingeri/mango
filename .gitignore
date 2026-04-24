@@ -8,5 +8,6 @@ chroma_db/
 dist/
 .benchmark_memory/
 data/
-results/
-mango_benchmark/
+mango_benchmark/results/
+mango_benchmark/splits/
+notes/

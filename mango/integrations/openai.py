@@ -26,12 +26,12 @@ class OpenAILlmService(LLMService):
         base_url: str | None = None,
     ) -> None:
         try:
-            import openai
+            from openai import OpenAI
         except ImportError:
             raise ImportError(
                 "openai package is not installed. Run: pip install mango-ai[openai]"
             )
-        self._client = openai.OpenAI(api_key=api_key, base_url=base_url)
+        self._client = OpenAI(api_key=api_key, base_url=base_url)
         self._model = model
         self._max_completion_tokens = max_completion_tokens
 
