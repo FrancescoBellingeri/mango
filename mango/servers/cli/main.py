@@ -282,7 +282,7 @@ def main() -> None:
     chat_parser = subparsers.add_parser("chat", help="Start interactive chat (default)")
     _add_common_args(chat_parser)
     chat_parser.add_argument("--provider", default=os.getenv("MANGO_PROVIDER", "openai"), choices=PROVIDERS)
-    chat_parser.add_argument("--model", default=os.getenv("MANGO_MODEL"))
+    chat_parser.add_argument("--model", default=os.getenv("MANGO_MODEL", "gpt-5.4"))
     chat_parser.add_argument("--api-key", default=None)
     chat_parser.add_argument("--no-schema", action="store_true", help="Skip schema introspection")
     chat_parser.add_argument("--no-memory", action="store_true", help="Disable memory layer")

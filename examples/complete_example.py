@@ -19,9 +19,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Configure your LLM
-llm = OpenAILlmService(
-    model="gpt-5.4",
-    api_key=os.getenv("OPENAI_API_KEY"),
+llm = OllamaLlmService(
+    model="qwen3.5:0.8b",
+    host="http://localhost:11434",
 )
 
 # Configure your database

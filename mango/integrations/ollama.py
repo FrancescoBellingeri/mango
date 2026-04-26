@@ -21,7 +21,7 @@ class OllamaLlmService(LLMService):
     def __init__(
         self,
         model: str = DEFAULT_MODEL,
-        host: str | None = None,
+        host: str = "http://localhost:11434",
         max_tokens: int = 4096,
     ) -> None:
         try:
@@ -31,7 +31,7 @@ class OllamaLlmService(LLMService):
                 "ollama package is not installed. Run: pip install ollama"
             )
         self._ollama = ollama
-        self._client = ollama.Client(host=host) if host else ollama.Client()
+        self._client = ollama.Client(host=host)
         self._model = model
         self._max_tokens = max_tokens
 

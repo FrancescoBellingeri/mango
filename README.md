@@ -20,6 +20,7 @@
 pip install mango-ai[anthropic]   # Claude
 pip install mango-ai[openai]      # GPT
 pip install mango-ai[gemini]      # Gemini
+pip install mango-ai[ollama]      # Ollama
 pip install mango-ai[all]         # all providers
 ```
 
@@ -36,6 +37,7 @@ from mango.tools import (
     RunMQLTool,
     SearchSavedCorrectToolUsesTool,
     SaveTextMemoryTool,
+    DeleteLastMemoryEntryTool,
 )
 from mango.servers.fastapi import MangoFastAPIServer
 from mango.integrations.anthropic import AnthropicLlmService
@@ -76,6 +78,9 @@ agent = MangoAgent(
     introspect=False
 )
 
+# Wire up the delete tool AFTER agent creation so it can reference agent state
+tools.register(DeleteLastMemoryEntryTool(agent_memory, lambda: agent._last_memory_entry_id))
+
 # Run the server
 server = MangoFastAPIServer(agent)
 server.run()  # http://localhost:8000
@@ -94,20 +99,22 @@ User question
 ┌─────────────────────────────────────────────┐
 │               MANGO AGENT                    │
 │                                              │
-│  1. Search memory for similar past queries   │
-│  2. Build system prompt with schema context  │
-│  3. LLM decides which tools to call          │
-│  4. Execute tools against MongoDB            │
-│  5. Feed results back to LLM                 │
-│  6. Stream natural language answer           │
-│  7. Auto-save successful queries to memory   │
+│  1. Inject training examples (gold-standard) │
+│  2. Search memory for similar past queries   │
+│  3. Build system prompt with schema context  │
+│  4. LLM decides which tools to call          │
+│  5. Validate MQL before execution            │
+│  6. Execute tools against MongoDB            │
+│  7. Auto-retry on fixable errors (max 2x)    │
+│  8. Stream natural language answer           │
+│  9. Auto-save successful queries to memory   │
 └─────────────────────────────────────────────┘
       │
       ▼
 SSE stream → your frontend
 ```
 
-**The learning loop:** steps 1 and 7 make Mango smarter over time. A novel question triggers deep LLM reasoning. A similar question already in memory gets answered faster and more accurately.
+**The learning loop:** steps 1, 2, and 9 make Mango smarter over time. Training examples are injected first — the LLM uses them directly without exploring the schema, which cuts latency and improves accuracy. Auto-saved examples accumulate during use. A novel question triggers full reasoning; a familiar one is answered in one shot.
 
 ---
 
@@ -149,19 +156,36 @@ Multi-turn conversations are supported — pass the same `session_id` to continu
 
 ## Agent Memory
 
-Mango learns from every successful interaction using ChromaDB as a vector store.
+Mango learns from every successful interaction using ChromaDB as a vector store. Memory is organized in three layers:
 
-- After each successful tool call, Mango automatically saves the `(question, tool, args, result)` tuple
-- On the next similar question, the saved example is injected as a few-shot prompt
-- The more you use it, the faster and more accurate it gets
+| Layer | How it's populated | Priority |
+|-------|--------------------|----------|
+| **Training** | You load verified examples explicitly | Injected first — LLM uses directly |
+| **Auto-save** | Populated automatically during use | Injected as few-shot context |
+| **Text notes** | You add domain knowledge manually | Retrieved when relevant |
 
-**Pre-load your domain knowledge:**
+**Load training data** (bulk, from a JSONL file):
+
+```bash
+mango train --file knowledge.jsonl
+```
+
+**Pre-load domain knowledge:**
 
 ```python
-memory.save_text("'active customer' means a customer who placed an order in the last 90 days")
-memory.save_text("'revenue' always refers to the total_amount field in the orders collection")
-memory.save_text("the 'status' field uses: 1=pending, 2=shipped, 3=delivered, 4=cancelled")
+await memory.save_text("'active customer' means placed an order in the last 90 days")
+await memory.save_text("'revenue' always refers to the total_amount field in orders")
+await memory.save_text("the 'status' field uses: 1=pending, 2=shipped, 3=delivered, 4=cancelled")
 ```
+
+**Correct mistakes in chat** — no UI needed:
+
+```
+User: that query was wrong, delete it
+Mango: Done — removed from memory ✓
+```
+
+→ Requires `DeleteLastMemoryEntryTool` registered after agent creation (see Quickstart).
 
 ---
 
@@ -173,11 +197,15 @@ memory.save_text("the 'status' field uses: 1=pending, 2=shipped, 3=delivered, 4=
 | `search_collections` | Search collections by name pattern (supports glob: `order*`, `*_log`). |
 | `describe_collection` | Full schema for a collection: field types, frequencies, indexes, references. |
 | `collection_stats` | Document count and storage size for a collection. |
-| `run_mql` | Execute a read-only MongoDB query: `find`, `aggregate`, `count`, `distinct`. |
+| `run_mql` | Execute a read-only MongoDB query: `find`, `aggregate`, `count`, `distinct`. Includes automatic MQL validation before execution. |
 | `search_saved_correct_tool_uses` | Search memory for similar past interactions. |
 | `save_text_memory` | Save free-form knowledge about the database for future queries. |
+| `explain_query` | *(opt-in)* Explain a query step-by-step in plain language + MongoDB execution stats. |
+| `delete_last_memory_entry` | *(opt-in)* Remove the last auto-saved entry when the user says a result was wrong. |
 
 > **Read-only by design.** `run_mql` only accepts `find`, `aggregate`, `count`, `distinct`. Write operations are rejected at the tool level.
+
+> **MQL validation.** Every `run_mql` call is validated before hitting the database — collection names, field names, and operators are checked against the live schema. Errors come back with hints (`did you mean 'order_total'?`) so the LLM can self-correct.
 
 ---
 
@@ -191,10 +219,12 @@ Mango is built on abstract interfaces — swap any component without touching yo
 from mango.integrations.anthropic import AnthropicLlmService
 from mango.integrations.openai import OpenAILlmService
 from mango.integrations.google import GeminiLlmService
+from mango.integrations.ollama import OllamaLlmService
 
 llm = AnthropicLlmService(model="claude-sonnet-4-6")
 llm = OpenAILlmService(model="gpt-5.4")
 llm = GeminiLlmService(model="gemini-3.1-pro-preview")
+llm = OllamaLlmService(model="qwen3.5:9b")  # fully local, no API key needed
 ```
 
 ### Custom Tools
@@ -271,7 +301,7 @@ Follow-up questions work naturally — no need to repeat context.
 |-----------|---------|
 | MongoDB driver | pymongo 4.x |
 | LLM (primary) | anthropic (Claude) |
-| LLM (secondary) | openai (GPT-4), google-generativeai (Gemini) |
+| LLM (secondary) | openai (GPT-4), google-generativeai (Gemini), ollama (local) |
 | Vector store | chromadb 1.x |
 | Server | FastAPI + uvicorn |
 | CLI | rich + prompt_toolkit |
@@ -294,14 +324,16 @@ Follow-up questions work naturally — no need to repeat context.
 - [x] `SaveTextMemoryTool` — business glossary and domain knowledge
 - [x] Adaptive collection grouping for large databases
 - [x] Multi-turn conversation with automatic pruning
-- [ ] Memory export/import (JSON)
-- [ ] `/train` command for bulk memory pre-loading
+- [x] Memory export/import (JSON)
+- [x] `mango train` — bulk training data pre-loading from JSONL
+- [x] `DeleteLastMemoryEntryTool` — in-chat memory correction
 
 **Polish**
-- [ ] `ValidatorTool` — pre-execution MQL validation
-- [ ] `ExplainQueryTool` — pipeline explanation in plain language
+- [x] `MQLValidator` — pre-execution validation with field/operator hints
+- [x] `ExplainQueryTool` — pipeline explanation in plain language + execution stats
+- [x] Retry-with-error flow (max 2 retries on fixable query errors)
+- [x] Ollama integration — fully local inference, no API key
 - [ ] `VisualizeDataTool` — charts and tables in CLI
-- [ ] Retry-with-error flow (max 2 retries on failed queries)
 
 **Expansion**
 - [ ] Atlas Vector Search memory backend
