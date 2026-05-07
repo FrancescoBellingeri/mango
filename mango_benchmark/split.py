@@ -1,34 +1,34 @@
-"""K-fold honest split for training vs benchmark ablation.
+"""Stratified honest split for training vs benchmark ablation.
 
-Takes the 79 training entries (trainingset_example.jsonl) and 79 benchmark
-rows (mango_ecommerce_benchmark.csv) and splits them independently into
-train/test by index using a fixed random seed.
+Logic:
+  - 169 benchmark questions, 79 with a matching training entry in the JSONL.
+  - The 79 "covered" questions are joined with their training entry and split
+    into train/test stratified by difficulty tag (easy / medium / hard).
+  - The 90 "uncovered" questions (no training entry) always go to the test set.
+  - Zero overlap by construction: a question is either in training_train OR
+    in benchmark_test, never both.
 
-Outputs:
-  mango_benchmark/splits/training_train.jsonl   — entries to load into ChromaDB
-  mango_benchmark/splits/training_test.jsonl    — held-out training entries (not loaded)
-  mango_benchmark/splits/benchmark_test.csv     — benchmark rows to evaluate on
-
-The test indices are THE SAME for both files, so the 19 benchmark questions
-correspond (by position/topic) to the 19 held-out training entries.
+Outputs (in mango_benchmark/splits/):
+  training_train.jsonl  — text notes + training entries for the train split
+  benchmark_test.csv    — test questions (covered test-split + all uncovered)
 
 Usage:
     python -m mango_benchmark.split
     python -m mango_benchmark.split --test-ratio 0.25 --seed 42
 
-Then run the 3 ablation comparisons:
+Ablation runs:
     # 1. No memory baseline
     python -m mango_benchmark.runner \\
-        --csv-path mango_benchmark/splits/benchmark_test.csv --no-memory
+        --csv-path mango_benchmark/splits/benchmark_test.csv --no-memory --sample 0
 
-    # 2. Memory, no training
+    # 2. Memory auto-save only
     python -m mango_benchmark.runner \\
-        --csv-path mango_benchmark/splits/benchmark_test.csv
+        --csv-path mango_benchmark/splits/benchmark_test.csv --sample 0
 
-    # 3. Memory + training (60 entries, test questions not included)
+    # 3. Memory + training (no leakage)
     python -m mango_benchmark.runner \\
         --csv-path mango_benchmark/splits/benchmark_test.csv \\
-        --training-file mango_benchmark/splits/training_train.jsonl
+        --training-file mango_benchmark/splits/training_train.jsonl --sample 0
 """
 
 from __future__ import annotations
@@ -38,18 +38,28 @@ import csv
 import json
 import random
 import sys
+from collections import defaultdict
 from pathlib import Path
 
 csv.field_size_limit(min(sys.maxsize, 2**31 - 1))
 
-_ROOT = Path(__file__).parent.parent
+_ROOT          = Path(__file__).parent.parent
 _TRAINING_JSONL = _ROOT / "examples" / "trainingset_example.jsonl"
 _BENCHMARK_CSV  = _ROOT / "mango_benchmark" / "mango_ecommerce_benchmark.csv"
 _OUT_DIR        = _ROOT / "mango_benchmark" / "splits"
 
+_DIFFICULTY_TAGS = ("easy", "medium", "hard")
+
+
+def _difficulty(tags: str) -> str:
+    for d in _DIFFICULTY_TAGS:
+        if d in tags.split("|"):
+            return d
+    return "medium"
+
 
 def split(
-    test_ratio: float = 0.35,
+    test_ratio: float = 0.25,
     seed: int = 42,
     training_jsonl: Path = _TRAINING_JSONL,
     benchmark_csv: Path = _BENCHMARK_CSV,
@@ -57,75 +67,108 @@ def split(
 ) -> None:
     rng = random.Random(seed)
 
-    # Load training entries (type=training only, preserve text entries separately)
+    # --- Load training JSONL ---
     with open(training_jsonl) as f:
         all_lines = [json.loads(l) for l in f if l.strip()]
-    text_entries   = [e for e in all_lines if e.get("type") != "training"]
-    training_entries = [e for e in all_lines if e.get("type") == "training"]
+    text_entries = [e for e in all_lines if e.get("type") != "training"]
+    # Index training entries by normalised question text
+    training_by_q: dict[str, dict] = {
+        e["question"].strip().lower(): e
+        for e in all_lines if e.get("type") == "training"
+    }
 
-    # Load benchmark rows
+    # --- Load benchmark CSV ---
     with open(benchmark_csv, newline="") as f:
         bench_rows = list(csv.DictReader(f))
 
-    n_train_total = len(training_entries)
-    n_bench_total = len(bench_rows)
+    # --- Join: covered vs uncovered ---
+    covered:   list[dict] = []  # have a training entry
+    uncovered: list[dict] = []  # no training entry → always go to test
 
-    # Split training entries independently
-    train_indices = list(range(n_train_total))
-    rng.shuffle(train_indices)
-    n_train_test  = max(1, round(n_train_total * test_ratio))
-    n_train_train = n_train_total - n_train_test
-    train_test_idx  = set(train_indices[:n_train_test])
-    train_train_idx = set(train_indices[n_train_test:])
+    for row in bench_rows:
+        try:
+            q = json.loads(row["input"])["nlQuery"].strip().lower()
+        except Exception:
+            uncovered.append(row)
+            continue
+        tags = row.get("tags", "")
+        if q in training_by_q:
+            covered.append({"row": row, "entry": training_by_q[q], "difficulty": _difficulty(tags)})
+        else:
+            uncovered.append(row)
 
-    # Split benchmark rows independently
-    bench_indices = list(range(n_bench_total))
-    rng.shuffle(bench_indices)
-    n_bench_test = max(1, round(n_bench_total * test_ratio))
-    bench_test_idx = bench_indices[:n_bench_test]
+    # --- Stratified split of covered questions ---
+    # Group by difficulty, shuffle each group, then take test_ratio from each.
+    by_difficulty: dict[str, list] = defaultdict(list)
+    for item in covered:
+        by_difficulty[item["difficulty"]].append(item)
 
-    train_entries_train = [training_entries[i] for i in sorted(train_train_idx)]
-    bench_test          = [bench_rows[i]        for i in sorted(bench_test_idx)]
+    train_items: list[dict] = []
+    test_items:  list[dict] = []
 
+    for diff in _DIFFICULTY_TAGS:
+        group = by_difficulty[diff]
+        rng.shuffle(group)
+        n_test = max(1, round(len(group) * test_ratio)) if group else 0
+        test_items.extend(group[:n_test])
+        train_items.extend(group[n_test:])
+
+    # --- Write outputs ---
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Write training_train.jsonl (text entries + train split)
+    # training_train.jsonl: text notes + training entries for train questions
     with open(out_dir / "training_train.jsonl", "w") as f:
         for e in text_entries:
             f.write(json.dumps(e) + "\n")
-        for e in train_entries_train:
-            f.write(json.dumps(e) + "\n")
+        for item in train_items:
+            f.write(json.dumps(item["entry"]) + "\n")
 
-    # Write training_test.jsonl (held-out — not loaded, just for reference)
-    with open(out_dir / "training_test.jsonl", "w") as f:
-        for i in sorted(train_test_idx):
-            f.write(json.dumps(training_entries[i]) + "\n")
-
-    # Write benchmark_test.csv
+    # benchmark_test.csv: test-split covered + all uncovered
+    test_bench_rows = [item["row"] for item in test_items] + uncovered
+    fieldnames = list(bench_rows[0].keys())
     with open(out_dir / "benchmark_test.csv", "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(bench_rows[0].keys()))
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(bench_test)
+        writer.writerows(test_bench_rows)
 
-    print(f"Seed: {seed}  |  Training: {n_train_total} total → {n_train_train} train / {n_train_test} held-out")
-    print(f"           |  Benchmark: {n_bench_total} total → {n_bench_test} test questions")
-    print(f"Output → {out_dir}/")
-    print(f"  training_train.jsonl  — {n_train_train} entries + {len(text_entries)} text notes")
-    print(f"  training_test.jsonl   — {n_train_test} held-out entries (reference only)")
-    print(f"  benchmark_test.csv    — {n_bench_test} benchmark questions to evaluate")
+    # --- Report ---
+    n_covered   = len(covered)
+    n_uncovered = len(uncovered)
+    n_train     = len(train_items)
+    n_test_cov  = len(test_items)
+    n_test_tot  = len(test_bench_rows)
+
+    print(f"Seed {seed}  |  test_ratio {test_ratio}")
     print()
-    print("Run ablation:")
-    print("  # 1. No memory")
+    print(f"  Benchmark total   : {len(bench_rows)} questions")
+    print(f"  Covered (w/ entry): {n_covered}  →  {n_train} train / {n_test_cov} test")
+    print(f"  Uncovered         : {n_uncovered}  →  all go to test")
+    print()
+    print("  Train split by difficulty:")
+    for d in _DIFFICULTY_TAGS:
+        n = sum(1 for i in train_items if i["difficulty"] == d)
+        print(f"    {d:<8} {n}")
+    print("  Test split by difficulty (covered only):")
+    for d in _DIFFICULTY_TAGS:
+        n = sum(1 for i in test_items if i["difficulty"] == d)
+        print(f"    {d:<8} {n}")
+    print()
+    print(f"  training_train.jsonl : {n_train} training entries + {len(text_entries)} text notes")
+    print(f"  benchmark_test.csv   : {n_test_tot} questions ({n_test_cov} covered + {n_uncovered} uncovered)")
+    print(f"  Overlap              : 0  (guaranteed by construction)")
+    print()
+    print(f"Output → {out_dir}/")
+    print()
+    print("Ablation runs:")
     print(f"  python -m mango_benchmark.runner --csv-path {out_dir}/benchmark_test.csv --no-memory --sample 0")
-    print("  # 2. Memory, no training")
     print(f"  python -m mango_benchmark.runner --csv-path {out_dir}/benchmark_test.csv --sample 0")
-    print("  # 3. Memory + training")
     print(f"  python -m mango_benchmark.runner --csv-path {out_dir}/benchmark_test.csv --training-file {out_dir}/training_train.jsonl --sample 0")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Split training/benchmark for honest ablation")
-    parser.add_argument("--test-ratio", type=float, default=0.25, help="Fraction for test set (default: 0.25 → ~20 questions)")
+    parser = argparse.ArgumentParser(description="Stratified honest split for mango ablation")
+    parser.add_argument("--test-ratio", type=float, default=0.25,
+                        help="Fraction of covered questions for test (default: 0.25)")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
     split(test_ratio=args.test_ratio, seed=args.seed)

@@ -7,6 +7,7 @@ interface ToolStep {
   success?: boolean
   preview?: string
   done: boolean
+  expanded: boolean
 }
 
 interface MessageMeta {
@@ -26,6 +27,13 @@ interface Message {
 }
 
 marked.setOptions({ breaks: true })
+
+function generateId() {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+    return crypto.randomUUID()
+  }
+  return Math.random().toString(36).substring(2, 11) + Date.now().toString(36)
+}
 
 function renderMarkdown(text: string): string {
   return marked.parse(text) as string
@@ -57,7 +65,7 @@ async function sendMessage() {
   isLoading.value = true
 
   messages.value.push({
-    id: crypto.randomUUID(),
+    id: generateId(),
     role: 'user',
     text: question,
     toolSteps: [],
@@ -65,7 +73,7 @@ async function sendMessage() {
   })
 
   const assistantMsg: Message = reactive({
-    id: crypto.randomUUID(),
+    id: generateId(),
     role: 'assistant',
     text: '',
     toolSteps: [],
@@ -124,6 +132,7 @@ function handleEvent(msg: Message, event: Record<string, unknown>) {
         name: event.tool_name as string,
         args: event.tool_args as Record<string, unknown>,
         done: false,
+        expanded: false,
       })
       break
 
@@ -234,16 +243,25 @@ const SUGGESTIONS = [
 
             <!-- Tool steps -->
             <div v-if="msg.toolSteps.length > 0" class="flex flex-col gap-1.5 pl-1 mb-1">
-              <div v-for="(step, i) in msg.toolSteps" :key="i" class="flex items-start gap-2 text-xs font-mono" style="color: #555;">
-                <span class="mt-0.5 shrink-0">
-                  <span v-if="!step.done" class="inline-block w-2.5 h-2.5 rounded-full border animate-pulse" style="border-color: #555;" />
-                  <span v-else-if="step.success" style="color: #4ade80;">✓</span>
-                  <span v-else style="color: #f87171;">✗</span>
-                </span>
-                <div class="min-w-0">
+              <div v-for="(step, i) in msg.toolSteps" :key="i" class="flex flex-col text-xs font-mono">
+                <div class="flex items-center gap-2" style="color: #555;">
+                  <span class="shrink-0">
+                    <span v-if="!step.done" class="inline-block w-2.5 h-2.5 rounded-full border animate-pulse" style="border-color: #555;" />
+                    <span v-else-if="step.success" style="color: #4ade80;">✓</span>
+                    <span v-else style="color: #f87171;">✗</span>
+                  </span>
                   <span style="color: #888;">{{ step.name }}</span>
-                  <span v-if="step.preview" class="block mt-0.5 whitespace-pre-wrap break-words" style="color: #444;">{{ step.preview }}</span>
+                  <button
+                    v-if="step.done && step.preview"
+                    @click="step.expanded = !step.expanded"
+                    class="tool-expand-btn ml-1 px-1.5 py-0.5 rounded text-xs transition-all"
+                  >{{ step.expanded ? '▲ hide' : '▼ show' }}</button>
                 </div>
+                <div
+                  v-if="step.expanded && step.preview"
+                  class="mt-1.5 ml-4 whitespace-pre-wrap break-words rounded-lg px-3 py-2"
+                  style="color: #666; background: #111; border: 1px solid #222;"
+                >{{ step.preview }}</div>
               </div>
             </div>
 
@@ -363,6 +381,18 @@ const SUGGESTIONS = [
 }
 .input-textarea::placeholder {
   color: #555;
+}
+
+/* Tool expand button */
+.tool-expand-btn {
+  color: #555;
+  border: 1px solid #2a2a2a;
+  background: transparent;
+  cursor: pointer;
+}
+.tool-expand-btn:hover {
+  color: #f97316;
+  border-color: #f97316;
 }
 
 /* Send button — orange accent */

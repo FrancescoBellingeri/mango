@@ -34,12 +34,14 @@ def _load_csv(path: str | Path) -> list[dict[str, Any]]:
         for row in reader:
             # Cast numeric columns
             for col in ("successful_execution", "non_empty_output", "reasonable_output",
-                        "correct_output_fuzzy", "xmaner", "latency_seconds"):
+                        "correct_output_fuzzy", "xmaner", "tool_arg_valid", "output_accuracy",
+                        "latency_seconds"):
                 try:
                     row[col] = float(row[col])  # type: ignore[assignment]
                 except (ValueError, KeyError):
                     row[col] = 0.0  # type: ignore[assignment]
-            for col in ("token_input", "token_output", "iterations", "memory_hits", "retries"):
+            for col in ("token_input", "token_output", "iterations", "memory_hits", "retries",
+                        "run_mql_calls"):
                 try:
                     row[col] = int(row[col])  # type: ignore[assignment]
                 except (ValueError, KeyError):
@@ -61,6 +63,10 @@ def _avg(rows: list[dict], key: str) -> float:
 
 def _summarise(rows: list[dict]) -> dict[str, float | int]:
     n = len(rows)
+    se_rows = [r for r in rows if r["successful_execution"] == 1.0]
+    pta = _avg(se_rows, "correct_output_fuzzy") if se_rows else 0.0
+    tav = _avg(rows, "tool_arg_valid")
+    oa = _avg(rows, "output_accuracy")
     return {
         "n": n,
         "xmaner": _avg(rows, "xmaner"),
@@ -68,6 +74,10 @@ def _summarise(rows: list[dict]) -> dict[str, float | int]:
         "neo": _avg(rows, "non_empty_output"),
         "ro": _avg(rows, "reasonable_output"),
         "co": _avg(rows, "correct_output_fuzzy"),
+        "tav": tav,
+        "oa": oa,
+        "pta": pta,
+        "gap": pta - oa,
         "latency": _avg(rows, "latency_seconds"),
         "tok_in": _avg(rows, "token_input"),
         "tok_out": _avg(rows, "token_output"),
@@ -170,7 +180,8 @@ def generate_report(
     else:
         out.write("=== Benchmark Results ===\n\n")
 
-    headers = ["Model", "N", "XMaNeR", "SE", "NEO", "RO", "CO", "Latency(s)", "Tokens(in/out)"]
+    headers = ["Model", "N", "XMaNeR", "SE", "NEO", "RO", "CO",
+               "TAV", "OA", "PTA", "Gap", "Latency(s)", "Tokens(in/out)"]
     table_rows: list[list[str]] = []
 
     for model_label, rows in sorted(by_model.items(), key=lambda x: -_avg(x[1], "xmaner")):
@@ -183,11 +194,28 @@ def generate_report(
             _fmt(s["neo"]),
             _fmt(s["ro"]),
             _fmt(s["co"]),
+            _fmt(s["tav"]),
+            _fmt(s["oa"]),
+            _fmt(s["pta"]),
+            _fmt(s["gap"]),
             f"{s['latency']:.2f}",
             f"{s['tok_in']:.0f}/{s['tok_out']:.0f}",
         ])
 
     _table(headers, table_rows, out, markdown=markdown)
+
+    # --- Legend for new metrics ---
+    out.write("\n")
+    legend = (
+        "TAV = ToolArgValid (primo run_mql OK senza retry)  |  "
+        "OA = OutputAccuracy (TAV × CO)  |  "
+        "PTA = PureTaskAccuracy (CO | SE=1)  |  "
+        "Gap = PTA − OA (accuratezza persa per problemi di formato)"
+    )
+    if markdown:
+        out.write(f"_{legend}_\n\n")
+    else:
+        out.write(legend + "\n")
 
     # --- Reference scores ---
     out.write("\n")

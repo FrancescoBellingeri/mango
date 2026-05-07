@@ -57,6 +57,9 @@ _COLUMNS = [
     "reasonable_output",
     "correct_output_fuzzy",
     "xmaner",
+    "tool_arg_valid",
+    "output_accuracy",
+    "run_mql_calls",
     "token_input",
     "token_output",
     "latency_seconds",
@@ -243,11 +246,13 @@ def _score_co(parsed: dict[str, Any] | None, expected_result: Any) -> float:
 
     Strategy by result type:
     - Count queries (expected is a number): actual count within 1%.
-    - Single-row aggregation (expected is a 1-element list): compare all
-      leaf field values fuzzy (F1 ≥ 0.8).
-    - Multi-row list queries (expected has >1 element): compare row count
-      within 20% AND field-name overlap ≥ 0.7.  We don't compare exact
-      document values because any valid subset is a correct answer.
+    - Single-row aggregation (expected is a 1-element list): all expected
+      leaf values present in actual values (recall ≥ 0.8). Extra fields in
+      the actual row are ignored — a more descriptive field name is correct.
+    - Multi-row list queries (expected has >1 element): row count within 20%
+      AND value overlap of the first row ≥ 0.7. Field names are ignored
+      because the LLM legitimately uses more descriptive aliases than the
+      reference (e.g. "customer_count" vs "count").
     """
     if parsed is None or expected_result is None:
         return 0.0
@@ -278,8 +283,20 @@ def _score_co(parsed: dict[str, Any] | None, expected_result: Any) -> float:
         expected_leaf = _leaf_fields(expected_result[0])
         actual_vals = [v for v in actual_leaf.values() if v is not None]
         expected_vals = [v for v in expected_leaf.values() if v is not None]
-        f1 = _fuzzy_f1(actual_vals, expected_vals)
-        return 1.0 if f1 >= 0.8 else 0.0
+        if not expected_vals:
+            return 1.0
+        # Use recall: are all expected values present in actual?
+        # Extra fields in actual (more descriptive aliases) do not penalise.
+        matched = 0
+        used: set[int] = set()
+        for exp_v in expected_vals:
+            for i, act_v in enumerate(actual_vals):
+                if i not in used and _values_match(exp_v, act_v):
+                    matched += 1
+                    used.add(i)
+                    break
+        recall = matched / len(expected_vals)
+        return 1.0 if recall >= 0.8 else 0.0
 
     # --- Multi-row list queries ---
     # 1. Row count within 20 %
@@ -289,13 +306,16 @@ def _score_co(parsed: dict[str, Any] | None, expected_result: Any) -> float:
     if count_ratio > 0.20:
         return 0.0
 
-    # 2. Field-name overlap between actual and reference documents
+    # 2. Value overlap of first row (field-name-agnostic).
+    # Compares the set of leaf values rather than field names so that
+    # descriptive aliases ("customer_count") score the same as generic
+    # ones ("count") when the underlying data is identical.
     if rows and isinstance(rows[0], dict) and isinstance(expected_result[0], dict):
-        actual_fields = set(_leaf_fields(rows[0]).keys())
-        expected_fields = set(_leaf_fields(expected_result[0]).keys())
-        if expected_fields:
-            overlap = len(actual_fields & expected_fields) / len(expected_fields)
-            return 1.0 if overlap >= 0.7 else 0.0
+        actual_vals = [v for v in _leaf_fields(rows[0]).values() if v is not None]
+        expected_vals = [v for v in _leaf_fields(expected_result[0]).values() if v is not None]
+        if expected_vals:
+            f1 = _fuzzy_f1(actual_vals, expected_vals)
+            return 1.0 if f1 >= 0.7 else 0.0
 
     return 1.0
 
@@ -307,14 +327,22 @@ def _score(
     tool_calls_made: list[str],
     timed_out: bool,
     error_detail: str,
+    run_mql_first_success: bool = False,
 ) -> dict[str, float]:
-    """Compute XMaNeR metrics for one question."""
+    """Compute XMaNeR metrics for one question.
+
+    New metrics (inspired by the structured-output reliability paper):
+    - tool_arg_valid (TAV): first run_mql call succeeded without retry/error.
+    - output_accuracy (OA): TAV × CO — joint event of format compliance + correct answer.
+    """
     zeros = dict(
         successful_execution=0.0,
         non_empty_output=0.0,
         reasonable_output=0.0,
         correct_output_fuzzy=0.0,
         xmaner=0.0,
+        tool_arg_valid=0.0,
+        output_accuracy=0.0,
     )
 
     if timed_out or error_detail:
@@ -353,12 +381,19 @@ def _score(
 
     xmaner = (se + neo + ro + co) / 4
 
+    # TAV: first run_mql call succeeded without needing a retry.
+    tav = 1.0 if run_mql_first_success else 0.0
+    # OA: joint event — format-compliant on first try AND correct answer.
+    oa = tav * co
+
     return dict(
         successful_execution=se,
         non_empty_output=neo,
         reasonable_output=ro,
         correct_output_fuzzy=co,
         xmaner=xmaner,
+        tool_arg_valid=tav,
+        output_accuracy=oa,
     )
 
 
@@ -376,12 +411,18 @@ async def _run_question(
     """Ask one question and return a result row dict."""
     last_mql_result: str | None = None
     mql_was_success: bool = False
+    run_mql_call_count: int = 0
+    run_mql_first_success: bool = False
 
     def _on_tool_call(tool_name: str, _tool_args: dict, result_text: str) -> None:
-        nonlocal last_mql_result, mql_was_success
+        nonlocal last_mql_result, mql_was_success, run_mql_call_count, run_mql_first_success
         if tool_name == "run_mql":
+            run_mql_call_count += 1
+            is_success = _parse_mql_result(result_text) is not None
+            if run_mql_call_count == 1 and is_success:
+                run_mql_first_success = True
             last_mql_result = result_text
-            mql_was_success = _parse_mql_result(result_text) is not None
+            mql_was_success = is_success
 
     t0 = time.perf_counter()
     error_detail = ""
@@ -418,6 +459,7 @@ async def _run_question(
         tool_calls_made=tool_calls_made,
         timed_out=timed_out,
         error_detail=error_detail,
+        run_mql_first_success=run_mql_first_success,
     )
 
     ref_output = ""
@@ -432,6 +474,7 @@ async def _run_question(
         "mango_result": last_mql_result or error_detail or "",
         "reference_output": ref_output,
         **metrics,
+        "run_mql_calls": run_mql_call_count,
         "token_input": input_tokens,
         "token_output": output_tokens,
         "latency_seconds": round(latency, 3),
@@ -611,6 +654,11 @@ def _print_model_summary(label: str, rows: list[dict]) -> None:
     if n == 0:
         return
     avg = lambda key: sum(r[key] for r in rows) / n  # noqa: E731
+    se_rows = [r for r in rows if r["successful_execution"] == 1.0]
+    pta = sum(r["correct_output_fuzzy"] for r in se_rows) / len(se_rows) if se_rows else 0.0
+    tav = avg("tool_arg_valid")
+    oa = avg("output_accuracy")
+    gap = pta - oa
     print(f"\n  Summary — {label}")
     print(f"  Questions : {n}")
     print(f"  XMaNeR    : {avg('xmaner'):.4f}")
@@ -618,6 +666,12 @@ def _print_model_summary(label: str, rows: list[dict]) -> None:
     print(f"  NEO       : {avg('non_empty_output'):.4f}")
     print(f"  RO        : {avg('reasonable_output'):.4f}")
     print(f"  CO        : {avg('correct_output_fuzzy'):.4f}")
+    print(f"  --- output accuracy (paper-inspired) ---")
+    print(f"  TAV       : {tav:.4f}  (first run_mql call OK, no retry needed)")
+    print(f"  OA        : {oa:.4f}  (TAV × CO — format + correttezza)")
+    print(f"  PTA       : {pta:.4f}  (CO | SE=1 — tetto se formato fosse perfetto)")
+    print(f"  Gap PTA-OA: {gap:.4f}  (accuratezza persa per problemi di formato)")
+    print(f"  Avg MQL calls: {avg('run_mql_calls'):.2f}")
     print(f"  Avg latency: {avg('latency_seconds'):.2f}s")
     print(f"  Avg tokens: {avg('token_input'):.0f} in / {avg('token_output'):.0f} out")
 
