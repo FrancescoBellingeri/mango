@@ -77,6 +77,10 @@ def _rules_section() -> str:
         "match the exact format, do not add 'Z' or timezone suffixes unless present in the data.",
         "Prefer aggregate pipelines over multiple find queries when joining or grouping.",
         "If a query fails, analyse the error and retry once with a corrected query.",
+        "After run_mql returns a result, verify it actually answers the question: "
+        "check that (1) the row count is plausible, (2) the output fields match what was asked, "
+        "(3) numeric values are in a reasonable range. "
+        "If the result looks wrong or incomplete, re-query with a corrected approach before answering.",
         "At the START of every question, call search_saved_correct_tool_uses to find similar "
         "past interactions. Use the results to guide your tool selection and arguments.",
         "Whenever you discover something useful about the database structure or business meaning "

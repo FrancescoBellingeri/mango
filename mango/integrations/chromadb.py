@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 
 import chromadb
 from chromadb.config import Settings
@@ -24,6 +25,71 @@ from chromadb.config import Settings
 from mango.memory import MemoryEntry, MemoryService, TextMemoryEntry, TrainingEntry, make_entry_id
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Structural tagging (DAIL-SQL inspired)
+# Appending MQL operation tags to the stored document improves retrieval for
+# structurally similar queries regardless of surface-level question wording.
+# ---------------------------------------------------------------------------
+
+_MQL_STAGE_RE = re.compile(r'"\$(\w+)"')
+
+_QUESTION_TAG_MAP: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"\b(join|lookup|linked|combined with|with their)\b", re.I), "lookup"),
+    (re.compile(r"\b(group|per|breakdown|by \w+|for each)\b", re.I),        "group"),
+    (re.compile(r"\b(monthly|weekly|yearly|per month|per year|trend|over time)\b", re.I), "date"),
+    (re.compile(r"\b(average|avg|mean)\b", re.I),                           "avg"),
+    (re.compile(r"\b(top \d|most |highest|lowest|best|worst)\b", re.I),     "sort"),
+    (re.compile(r"\b(how many|count|total number)\b", re.I),                "count"),
+    (re.compile(r"\b(ratio|percentage|percent|rate)\b", re.I),              "ratio"),
+    (re.compile(r"\b(array|items|events|nested)\b", re.I),                  "array"),
+]
+
+_AGGREGATE_STAGES = {"lookup", "unwind", "group", "bucket", "facet", "graphLookup"}
+
+
+def _tool_args_tags(tool_args: dict) -> str:
+    """Extract structural MQL tags from tool_args to append to stored document."""
+    raw = json.dumps(tool_args)
+    stages = set(_MQL_STAGE_RE.findall(raw))
+    tags: list[str] = []
+
+    if stages & _AGGREGATE_STAGES or "pipeline" in tool_args:
+        tags.append("aggregate")
+    for stage in ("lookup", "unwind", "group", "sort", "project", "limit", "match"):
+        if stage in stages:
+            tags.append(stage)
+    date_ops = {"dateToString", "year", "month", "dayOfMonth", "dateFromString", "dateTrunc"}
+    if stages & date_ops:
+        tags.append("date")
+    array_ops = {"size", "filter", "map", "arrayElemAt", "reduce", "unwind"}
+    if stages & array_ops:
+        tags.append("array")
+
+    return " ".join(tags)
+
+
+def _question_tags(question: str) -> str:
+    """Extract expected structural tags from a natural language question."""
+    tags: list[str] = []
+    for pattern, tag in _QUESTION_TAG_MAP:
+        if pattern.search(question):
+            tags.append(tag)
+    return " ".join(tags)
+
+
+def _tag_overlap(query_tags: str, stored_tags: str) -> float:
+    """Jaccard overlap between two space-separated tag strings."""
+    q = set(query_tags.split()) if query_tags else set()
+    s = set(stored_tags.split()) if stored_tags else set()
+    if not q and not s:
+        return 1.0
+    if not q or not s:
+        return 0.0
+    return len(q & s) / len(q | s)
+
+
+_RERANK_ALPHA = 0.7  # weight for semantic similarity; (1-α) for structural overlap
 
 
 class ChromaAgentMemory(MemoryService):
@@ -84,6 +150,7 @@ class ChromaAgentMemory(MemoryService):
                 "tool_name": entry.tool_name,
                 "tool_args": json.dumps(entry.tool_args, default=str),
                 "result_summary": entry.result_summary,
+                "struct_tags": _tool_args_tags(entry.tool_args),
             }
             self._collection.upsert(
                 ids=[entry.id],
@@ -106,27 +173,36 @@ class ChromaAgentMemory(MemoryService):
             if total == 0:
                 return []
 
-            n = min(top_k, total)
+            # Stage 1: over-fetch by 3× for re-ranking headroom
+            n_fetch = min(top_k * 3, total)
             results = self._collection.query(
                 query_texts=[question],
-                n_results=n,
+                n_results=n_fetch,
                 include=["documents", "metadatas", "distances"],
             )
 
-            entries: list[MemoryEntry] = []
+            q_tags = _question_tags(question)
+            candidates: list[tuple[float, int, str]] = []  # (score, i, entry_id)
+
             for i, entry_id in enumerate(results["ids"][0]):
-                meta = results["metadatas"][0][i]
                 distance = results["distances"][0][i]
-                similarity = max(0.0, 1.0 - distance)
-
-                if similarity < similarity_threshold:
+                sem_sim = max(0.0, 1.0 - distance)
+                if sem_sim < similarity_threshold:
                     continue
+                stored_tags = results["metadatas"][0][i].get("struct_tags", "")
+                struct_sim = _tag_overlap(q_tags, stored_tags)
+                score = _RERANK_ALPHA * sem_sim + (1.0 - _RERANK_ALPHA) * struct_sim
+                candidates.append((score, i, entry_id))
 
+            # Stage 2: re-rank and take top_k
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            entries: list[MemoryEntry] = []
+            for score, i, entry_id in candidates[:top_k]:
+                meta = results["metadatas"][0][i]
                 try:
                     tool_args = json.loads(meta.get("tool_args", "{}"))
                 except json.JSONDecodeError:
                     tool_args = {}
-
                 entries.append(
                     MemoryEntry(
                         id=entry_id,
@@ -134,7 +210,7 @@ class ChromaAgentMemory(MemoryService):
                         tool_name=meta.get("tool_name", ""),
                         tool_args=tool_args,
                         result_summary=meta.get("result_summary", ""),
-                        similarity=round(similarity, 3),
+                        similarity=round(score, 3),
                     )
                 )
             return entries
@@ -219,6 +295,7 @@ class ChromaAgentMemory(MemoryService):
                 "tool_args": json.dumps(entry.tool_args, default=str),
                 "result_summary": entry.result_summary,
                 "timestamp": entry.timestamp,
+                "struct_tags": _tool_args_tags(entry.tool_args),
             }
             self._training_collection.upsert(
                 ids=[entry.id],
@@ -241,27 +318,36 @@ class ChromaAgentMemory(MemoryService):
             if total == 0:
                 return []
 
-            n = min(top_k, total)
+            # Stage 1: over-fetch by 3× for re-ranking headroom
+            n_fetch = min(top_k * 3, total)
             results = self._training_collection.query(
                 query_texts=[question],
-                n_results=n,
+                n_results=n_fetch,
                 include=["documents", "metadatas", "distances"],
             )
 
-            entries: list[TrainingEntry] = []
+            q_tags = _question_tags(question)
+            candidates: list[tuple[float, int, str]] = []
+
             for i, entry_id in enumerate(results["ids"][0]):
-                meta = results["metadatas"][0][i]
                 distance = results["distances"][0][i]
-                similarity = max(0.0, 1.0 - distance)
-
-                if similarity < similarity_threshold:
+                sem_sim = max(0.0, 1.0 - distance)
+                if sem_sim < similarity_threshold:
                     continue
+                stored_tags = results["metadatas"][0][i].get("struct_tags", "")
+                struct_sim = _tag_overlap(q_tags, stored_tags)
+                score = _RERANK_ALPHA * sem_sim + (1.0 - _RERANK_ALPHA) * struct_sim
+                candidates.append((score, i, entry_id))
 
+            # Stage 2: re-rank and take top_k
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            entries: list[TrainingEntry] = []
+            for score, i, entry_id in candidates[:top_k]:
+                meta = results["metadatas"][0][i]
                 try:
                     tool_args = json.loads(meta.get("tool_args", "{}"))
                 except json.JSONDecodeError:
                     tool_args = {}
-
                 entries.append(
                     TrainingEntry(
                         id=entry_id,
@@ -269,7 +355,7 @@ class ChromaAgentMemory(MemoryService):
                         tool_name=meta.get("tool_name", ""),
                         tool_args=tool_args,
                         result_summary=meta.get("result_summary", ""),
-                        similarity=round(similarity, 3),
+                        similarity=round(score, 3),
                         timestamp=meta.get("timestamp", ""),
                     )
                 )
