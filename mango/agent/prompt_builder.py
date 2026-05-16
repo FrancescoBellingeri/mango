@@ -131,6 +131,27 @@ def _schema_section(schema: dict[str, SchemaInfo]) -> str:
     return "\n".join(lines)
 
 
+def schema_section_for_query(
+    schema: dict[str, SchemaInfo],
+    collection_names: list[str],
+    total_collections: int,
+) -> str:
+    """Build schema section for a specific subset of collections (per-query injection)."""
+    lines: list[str] = [
+        f"## Relevant schema ({len(collection_names)} of {total_collections} collections shown — "
+        "use list_collections + describe_collection to explore others)"
+    ]
+    for name in collection_names:
+        info = schema.get(name)
+        if info is None:
+            lines.append(f"\n### {name}\n_(schema not available)_")
+            continue
+        lines.append(f"\n### {name}")
+        lines.append(f"Documents: ~{info.document_count:,}")
+        lines.append(_render_fields(info.fields))
+    return "\n".join(lines)
+
+
 def _output_section() -> str:
     return (
         "## Output format\n"

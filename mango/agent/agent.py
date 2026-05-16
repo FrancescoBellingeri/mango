@@ -20,7 +20,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import AsyncGenerator, Callable
 
-from mango.agent.prompt_builder import build_system_prompt
+import re
+
+from mango.agent.prompt_builder import build_system_prompt, schema_section_for_query
 from mango.nosql_runner import NoSQLRunner
 from mango.core.types import SchemaInfo
 from mango.llm import LLMService, Message
@@ -130,6 +132,8 @@ class MangoAgent:
         memory_top_k: int = 3,
         training_top_k: int = 3,
         max_turns: int = 5,
+        schema_top_k: int = 3,
+        schema_always_all: int = 4,
     ) -> None:
         self._llm = llm_service
         self._db = db
@@ -142,6 +146,8 @@ class MangoAgent:
         self._memory_top_k = memory_top_k
         self._training_top_k = training_top_k
         self._max_turns = max_turns
+        self._schema_top_k = schema_top_k
+        self._schema_always_all = schema_always_all
         self._system_prompt: str = ""
         self._conversation: list[Message] = []
         self._ready: bool = False
@@ -185,10 +191,8 @@ class MangoAgent:
             logger.info("Introspecting schema for %d collections…", len(collections))
             self._schema = self._db.introspect_schema()
 
-        self._system_prompt = build_system_prompt(
-            db_name=db_name,
-            schema=self._schema,
-        )
+        # Schema is injected dynamically per-query in _prepare_turn; omit here.
+        self._system_prompt = build_system_prompt(db_name=db_name, schema=None)
         self._ready = True
         logger.info("Agent ready. Model: %s", self._llm.get_model_name())
 
@@ -210,6 +214,8 @@ class MangoAgent:
             memory_top_k=self._memory_top_k,
             training_top_k=self._training_top_k,
             max_turns=self._max_turns,
+            schema_top_k=self._schema_top_k,
+            schema_always_all=self._schema_always_all,
         )
         agent._system_prompt = self._system_prompt
         agent._ready = self._ready
@@ -312,6 +318,34 @@ class MangoAgent:
     # Private: core loop
     # ------------------------------------------------------------------
 
+    async def _select_relevant_collections(self, question: str) -> list[str]:
+        """Return names of collections most relevant to the question."""
+        if not self._schema:
+            return []
+        all_names = list(self._schema.keys())
+        if len(all_names) <= self._schema_always_all:
+            return all_names
+
+        q_tokens = set(re.sub(r"[^\w]", " ", question.lower()).split())
+
+        scores: list[tuple[int, str]] = []
+        for name in all_names:
+            keywords: set[str] = set(re.split(r"[_\s]", name.lower()))
+            info = self._schema[name]
+            for f in info.fields:
+                if "." not in f.path:
+                    keywords.update(re.split(r"[_\s]", f.name.lower()))
+            score = len(q_tokens & keywords)
+            for qt in q_tokens:
+                for kw in keywords:
+                    if len(qt) >= 4 and (kw.startswith(qt) or qt.startswith(kw)):
+                        score += 1
+                        break
+            scores.append((score, name))
+
+        scores.sort(key=lambda x: x[0], reverse=True)
+        return [name for _, name in scores[: self._schema_top_k]]
+
     async def _prepare_turn(self, question: str) -> tuple[int, str]:
         """Add user message, retrieve memory, build per-turn system prompt.
 
@@ -359,8 +393,15 @@ class MangoAgent:
             if sections:
                 memory_context = "\n\n".join(sections) + "\n\n"
 
+        schema_section = ""
+        if self._schema:
+            relevant = await self._select_relevant_collections(question)
+            schema_section = schema_section_for_query(
+                self._schema, relevant, total_collections=len(self._schema)
+            ) + "\n\n"
+
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S UTC")
-        system_prompt = f"Current datetime: {now}\n\n{memory_context}{self._system_prompt}"
+        system_prompt = f"Current datetime: {now}\n\n{memory_context}{self._system_prompt}\n\n{schema_section}"
 
         return memory_hits, system_prompt
 
