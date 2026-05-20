@@ -22,7 +22,7 @@ from typing import AsyncGenerator, Callable
 
 import re
 
-from mango.agent.prompt_builder import build_system_prompt, schema_section_for_query
+from mango.agent.prompt_builder import build_system_prompt, schema_section_for_query, _FULL_SCHEMA_THRESHOLD
 from mango.nosql_runner import NoSQLRunner
 from mango.core.types import SchemaInfo
 from mango.llm import LLMService, Message
@@ -424,6 +424,7 @@ class MangoAgent:
         total_output_tokens = 0
         iterations = 0
         retry_count = 0
+        inspected_collections: set[str] = set()
 
         while iterations < self._max_iterations:
             iterations += 1
@@ -475,10 +476,29 @@ class MangoAgent:
                 tool_calls_made.append(tc.tool_name)
                 logger.info("Tool call: %s(%s)", tc.tool_name, tc.tool_args)
 
+                if tc.tool_name == "describe_collection":
+                    col = tc.tool_args.get("collection")
+                    if col:
+                        inspected_collections.add(col)
+
                 yield {"type": "tool_call", "tool_name": tc.tool_name, "tool_args": tc.tool_args}
 
+                schema_prefix = ""
+                if (
+                    tc.tool_name == "run_mql"
+                    and self._schema is not None
+                    and len(self._schema) > _FULL_SCHEMA_THRESHOLD
+                ):
+                    col = tc.tool_args.get("collection")
+                    if col and col not in inspected_collections:
+                        desc = await self._registry.execute("describe_collection", collection=col)
+                        if desc.success:
+                            inspected_collections.add(col)
+                            schema_prefix = f"[AUTO-SCHEMA for '{col}']\n{desc.as_text()}\n\n"
+                            logger.debug("Auto-injected schema for collection '%s'", col)
+
                 result = await self._registry.execute(tc.tool_name, **tc.tool_args)
-                result_text = result.as_text()
+                result_text = schema_prefix + result.as_text()
 
                 logger.debug("Tool result (%s): %.200s…", tc.tool_name, result_text)
 

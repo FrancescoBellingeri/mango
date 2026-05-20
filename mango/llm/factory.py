@@ -20,6 +20,7 @@ def build_llm(
     provider: str,
     model: str | None = None,
     api_key: str | None = None,
+    base_url: str | None = None,
 ) -> LLMService:
     """Instantiate an LLMService for the given provider.
 
@@ -50,6 +51,13 @@ def build_llm(
             kwargs["model"] = model
         if api_key:
             kwargs["api_key"] = api_key
+        if base_url:
+            kwargs["base_url"] = base_url
+        elif model and not model.startswith("gpt"):
+            raise ValueError(
+                f"Model '{model}' is not a native OpenAI model. "
+                "Pass base_url for OpenAI-compatible providers (e.g. Together AI: https://api.together.xyz/v1)."
+            )
         return OpenAILlmService(**kwargs)
 
     if provider == "gemini":

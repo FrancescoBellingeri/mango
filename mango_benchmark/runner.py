@@ -91,6 +91,7 @@ def _build_agent(
     provider: str,
     model: str | None,
     api_key: str | None,
+    base_url: str | None = None,
     db_name: str,
     mongo_uri: str,
     memory_enabled: bool,
@@ -100,7 +101,7 @@ def _build_agent(
     mongo_kwargs: dict | None = None,
 ) -> MangoAgent:
     """Build and return a ready MangoAgent connected to *db_name*."""
-    llm = build_llm(provider=provider, model=model, api_key=api_key)
+    llm = build_llm(provider=provider, model=model, api_key=api_key, base_url=base_url)
 
     db = MongoRunner()
     db.connect(_uri_for_db(mongo_uri, db_name), **(mongo_kwargs or {}))
@@ -552,6 +553,7 @@ async def run_benchmark(
             provider = model_cfg["provider"]
             model = model_cfg.get("model")
             api_key = model_cfg.get("api_key")
+            base_url = model_cfg.get("base_url")
             training_tag = " [+training]" if training_file else ""
             model_label = f"{model or provider} ({provider}){training_tag}"
 
@@ -569,6 +571,7 @@ async def run_benchmark(
                         provider=provider,
                         model=model,
                         api_key=api_key,
+                        base_url=base_url,
                         db_name=db_name,
                         mongo_uri=mongo_uri,
                         memory_enabled=memory_enabled,
@@ -631,13 +634,14 @@ async def run_benchmark(
                     jsonl_f.flush()
 
                     if verbose:
+                        err = f" ERR={row['error_detail']}" if row["error_detail"] else ""
                         print(
                             f"\n    Q{item['_idx']}: xmaner={row['xmaner']:.2f} "
                             f"se={row['successful_execution']:.0f} "
                             f"neo={row['non_empty_output']:.0f} "
                             f"ro={row['reasonable_output']:.0f} "
                             f"co={row['correct_output_fuzzy']:.0f} "
-                            f"lat={row['latency_seconds']}s"
+                            f"lat={row['latency_seconds']}s{err}"
                         )
 
             # Print model summary
@@ -674,6 +678,11 @@ def _print_model_summary(label: str, rows: list[dict]) -> None:
     print(f"  Avg MQL calls: {avg('run_mql_calls'):.2f}")
     print(f"  Avg latency: {avg('latency_seconds'):.2f}s")
     print(f"  Avg tokens: {avg('token_input'):.0f} in / {avg('token_output'):.0f} out")
+    error_rows = [r for r in rows if r["error_detail"]]
+    if error_rows:
+        print(f"  Errors: {len(error_rows)}/{n}")
+        for r in error_rows[:5]:
+            print(f"    Q{r['question_id']}: {r['error_detail']}")
 
 
 # ---------------------------------------------------------------------------
@@ -785,6 +794,24 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--api-key",
+        default=None,
+        metavar="KEY",
+        help=(
+            "API key for the LLM provider. Overrides provider-specific env vars "
+            "(ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, etc.)."
+        ),
+    )
+    parser.add_argument(
+        "--base-url",
+        default=None,
+        metavar="URL",
+        help=(
+            "Base URL for OpenAI-compatible providers (e.g. Together AI: https://api.together.xyz/v1). "
+            "Required when using --provider openai with a non-gpt model."
+        ),
+    )
+    parser.add_argument(
         "--log-level",
         default="WARNING",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
@@ -798,10 +825,20 @@ def main() -> None:
     # Resolve model list
     if args.providers:
         models = [_parse_model_spec(s) for s in args.providers]
+        for m in models:
+            if args.api_key:
+                m["api_key"] = args.api_key
+            if args.base_url:
+                m["base_url"] = args.base_url
     elif args.provider:
-        models = [{"provider": args.provider, "model": args.model, "api_key": None}]
+        models = [{"provider": args.provider, "model": args.model, "api_key": args.api_key, "base_url": args.base_url}]
     else:
         models = _cfg.MODELS
+        for m in models:
+            if args.api_key:
+                m["api_key"] = args.api_key
+            if args.base_url:
+                m["base_url"] = args.base_url
 
     mongo_uri = args.mongo_uri
     if not mongo_uri and not args.dry_run:

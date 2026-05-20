@@ -81,8 +81,6 @@ def _rules_section() -> str:
         "check that (1) the row count is plausible, (2) the output fields match what was asked, "
         "(3) numeric values are in a reasonable range. "
         "If the result looks wrong or incomplete, re-query with a corrected approach before answering.",
-        "At the START of every question, call search_saved_correct_tool_uses to find similar "
-        "past interactions. Use the results to guide your tool selection and arguments.",
         "Whenever you discover something useful about the database structure or business meaning "
         "(e.g. which collection holds customer data, what a field's values mean), "
         "call save_text_memory to persist that insight.",

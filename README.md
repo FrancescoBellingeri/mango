@@ -12,7 +12,7 @@
 
 ![Mango demo](src/readme_mango.gif)
 
-<h2 align="center"><a href="https://mango.francescobellingeri.com/">📖 Full documentation</a></h2>
+<h1 align="center"><a href="https://mango.francescobellingeri.com/">📖 Full Documentation</a></h2>
 
 ## Install
 
@@ -35,7 +35,6 @@ from mango.tools import (
     DescribeCollectionTool,
     CollectionStatsTool,
     RunMQLTool,
-    SearchSavedCorrectToolUsesTool,
     SaveTextMemoryTool,
     DeleteLastMemoryEntryTool,
 )
@@ -66,7 +65,6 @@ tools.register(SearchCollectionsTool(db))
 tools.register(DescribeCollectionTool(db))
 tools.register(CollectionStatsTool(db))
 tools.register(RunMQLTool(db))
-tools.register(SearchSavedCorrectToolUsesTool(agent_memory))
 tools.register(SaveTextMemoryTool(agent_memory))
 
 # Create your agent
@@ -100,21 +98,24 @@ User question
 │               MANGO AGENT                    │
 │                                              │
 │  1. Inject training examples (gold-standard) │
-│  2. Search memory for similar past queries   │
-│  3. Build system prompt with schema context  │
+│  2. Pre-inject memory examples into prompt   │
+│  3. Select relevant schema (per-query)       │
 │  4. LLM decides which tools to call          │
-│  5. Validate MQL before execution            │
-│  6. Execute tools against MongoDB            │
-│  7. Auto-retry on fixable errors (max 2x)    │
-│  8. Stream natural language answer           │
-│  9. Auto-save successful queries to memory   │
+│  5. Auto-inject schema before run_mql (*)    │
+│  6. Validate MQL before execution            │
+│  7. Execute tools against MongoDB            │
+│  8. Auto-retry on fixable errors (max 2x)    │
+│  9. Stream natural language answer           │
+│ 10. Auto-save successful queries to memory   │
 └─────────────────────────────────────────────┘
       │
       ▼
 SSE stream → your frontend
 ```
 
-**The learning loop:** steps 1, 2, and 9 make Mango smarter over time. Training examples are injected first — the LLM uses them directly without exploring the schema, which cuts latency and improves accuracy. Auto-saved examples accumulate during use. A novel question triggers full reasoning; a familiar one is answered in one shot.
+**The learning loop:** steps 1, 2, and 10 make Mango smarter over time. Training examples are injected first — the LLM uses them directly without exploring the schema, which cuts latency and improves accuracy. Auto-saved examples accumulate during use. A novel question triggers full reasoning; a familiar one is answered in one shot.
+
+**(*) Schema linking enforcement:** for databases with more than 10 collections, Mango automatically runs `describe_collection` before the first `run_mql` call on any uninspected collection and prepends the result. The LLM sees the schema in the result without an extra round-trip — this is the single most impactful optimization for smaller models.
 
 ---
 
@@ -198,7 +199,6 @@ Mango: Done — removed from memory ✓
 | `describe_collection` | Full schema for a collection: field types, frequencies, indexes, references. |
 | `collection_stats` | Document count and storage size for a collection. |
 | `run_mql` | Execute a read-only MongoDB query: `find`, `aggregate`, `count`, `distinct`. Includes automatic MQL validation before execution. |
-| `search_saved_correct_tool_uses` | Search memory for similar past interactions. |
 | `save_text_memory` | Save free-form knowledge about the database for future queries. |
 | `explain_query` | *(opt-in)* Explain a query step-by-step in plain language + MongoDB execution stats. |
 | `delete_last_memory_entry` | *(opt-in)* Remove the last auto-saved entry when the user says a result was wrong. |
@@ -270,7 +270,9 @@ class MyPineconeMemory(MemoryService):
 Mango handles databases with hundreds or thousands of collections without token explosion.
 
 - **Adaptive collection listing** — databases with 100+ collections are automatically grouped by name pattern (`contest_*`, `user_*`) instead of listing every single one
-- **On-demand schema** — schema details are only fetched when the LLM needs them, not injected upfront
+- **Per-query schema injection** — keyword-based relevance ranking selects only the most relevant collections for each question; full schema is never dumped upfront
+- **Schema linking enforcement** — for large databases (>10 collections), the agent automatically describes a collection before querying it, preventing field-name errors and wrong joins
+- **Structural tagging in memory** — ChromaDB retrieval uses MQL operation tags (`$lookup`, `$group`, `$match`) alongside semantic similarity to find the most relevant past examples
 - **Turn-based conversation pruning** — conversation history is automatically trimmed to keep token usage stable across long sessions
 - **Auto-save to memory** — schema discoveries are persisted so the LLM doesn't re-introspect the same collections repeatedly
 
@@ -333,6 +335,9 @@ Follow-up questions work naturally — no need to repeat context.
 - [x] `ExplainQueryTool` — pipeline explanation in plain language + execution stats
 - [x] Retry-with-error flow (max 2 retries on fixable query errors)
 - [x] Ollama integration — fully local inference, no API key
+- [x] Per-query schema injection — keyword-based collection relevance ranking
+- [x] Structural tagging in ChromaDB — MQL operation tags improve few-shot retrieval
+- [x] Schema linking enforcement — auto `describe_collection` before `run_mql` for large DBs
 - [ ] `VisualizeDataTool` — charts and tables in CLI
 
 **Expansion**
@@ -341,6 +346,32 @@ Follow-up questions work naturally — no need to repeat context.
 - [ ] Cassandra backend (experimental)
 - [ ] DynamoDB backend (experimental)
 - [ ] Memory analytics (most common queries, accuracy tracking)
+
+---
+
+## Benchmark
+
+Evaluated on **110 NL→MQL questions** against a production-scale MongoDB e-commerce dataset (orders, customers, products, inventory, reviews, shipments, events). Each question has a verified reference output; scoring uses XMaNeR — a composite of Successful Execution, Non-Empty Output, Reasonable Output, and Correct Output (fuzzy value match).
+
+| Model | Params (active) | XMaNeR | SE | CO | TAV | Avg tokens | Avg latency |
+|-------|----------------|--------|----|----|-----|-----------|-------------|
+| Kimi-K2.6 | ~1T | **0.884** | 94.5% | **70.0%** | 93.6% | 15,226 | 21.4s |
+| Qwen3.6-35B *(MoE)* | 3B | 0.877 | **96.4%** | 64.6% | 90.0% | 19,661 | 19.2s |
+| DeepSeek-v4-flash *(MoE)* | 13B | 0.868 | 95.5% | 60.9% | 92.7% | 21,368 | 26.8s |
+| GPT-5.4-nano | — | 0.861 | 97.3% | 55.5% | **97.3%** | **14,141** | **12.3s** |
+
+> **SE** = Successful Execution · **CO** = Correct Output · **TAV** = Tool Arg Valid (first call, no retry)
+
+**Key finding:** Qwen3.6-35B with only 3B active parameters reaches within 0.7 XMaNeR points of Kimi-K2.6 (~1T parameters, comparable to Claude Opus / GPT-5), at roughly 1/30th the inference cost — and runs on a machine with 128 GB RAM. The gap closes because Mango's context pipeline (training injection, per-query schema selection, schema linking enforcement) does the heavy lifting regardless of the underlying model.
+
+Run the benchmark yourself:
+
+```bash
+python -m mango_benchmark.runner \
+  --csv-path mango_benchmark/splits/benchmark_test.csv \
+  --training-file mango_benchmark/splits/training_train.jsonl \
+  --sample 0 --verbose
+```
 
 ---
 
