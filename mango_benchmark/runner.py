@@ -18,6 +18,7 @@ import csv
 import json
 import logging
 import os
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -99,8 +100,16 @@ def _build_agent(
     max_iterations: int,
     training_file: str | None = None,
     mongo_kwargs: dict | None = None,
+    max_rows: int = 100_000,
 ) -> MangoAgent:
-    """Build and return a ready MangoAgent connected to *db_name*."""
+    """Build and return a ready MangoAgent connected to *db_name*.
+
+    ``max_rows`` raises RunMQLTool's row cap (production default 100). For
+    benchmark runs it must be high enough that the agent's result-set is complete:
+    a 100-row cap silently truncates large results and turns a correct query into
+    a false FAIL on the execution-accuracy metric. The gold side is uncapped, so
+    capping only the agent side is a one-sided truncation.
+    """
     llm = build_llm(provider=provider, model=model, api_key=api_key, base_url=base_url)
 
     db = MongoRunner()
@@ -128,7 +137,7 @@ def _build_agent(
         tools.register(SearchSavedCorrectToolUsesTool(agent_memory))
         tools.register(SaveTextMemoryTool(agent_memory))
 
-    tools.register(RunMQLTool(db))
+    tools.register(RunMQLTool(db, max_rows=max_rows))
 
     agent = MangoAgent(
         llm_service=llm,
@@ -148,7 +157,14 @@ def _build_agent(
 
 
 def _parse_mql_result(result_text: str) -> dict[str, Any] | None:
-    """Parse a RunMQLTool result_text into a Python dict, or None on failure."""
+    """Parse a RunMQLTool result_text into a Python dict, or None on failure.
+
+    The agent loop may prepend an ``[AUTO-SCHEMA for '<col>']\\n…\\n\\n`` block to
+    the run_mql result when the schema is large, so the actual ``{"rows":…}`` JSON
+    is not at offset 0. We therefore extract the trailing result object rather
+    than parsing the whole string (the previous version returned None on every
+    auto-schema-prefixed result, silently corrupting success detection).
+    """
     if not result_text:
         return None
     # Error or retry messages injected by the agent loop
@@ -157,7 +173,16 @@ def _parse_mql_result(result_text: str) -> dict[str, Any] | None:
     try:
         return json.loads(result_text)
     except (json.JSONDecodeError, ValueError):
-        return None
+        pass
+    # Strip any AUTO-SCHEMA prefix: the run_mql payload is the final {"rows":…}.
+    decoder = json.JSONDecoder()
+    for m in re.finditer(r'\{\s*"rows"', result_text):
+        try:
+            obj, _ = decoder.raw_decode(result_text[m.start():])
+            return obj
+        except (json.JSONDecodeError, ValueError):
+            continue
+    return None
 
 
 def _flatten_values(obj: Any) -> list:
@@ -414,12 +439,23 @@ async def _run_question(
     mql_was_success: bool = False
     run_mql_call_count: int = 0
     run_mql_first_success: bool = False
+    # Every run_mql invocation, in call order: its generated QueryRequest args and
+    # its parsed result. The scorer needs ALL calls, not just the last: a
+    # multi-call agent may run the answer-bearing query (e.g. a count) and then a
+    # supplementary one (e.g. a breakdown), so "last result" is not "the answer".
+    # execution_accuracy = does ANY successful call's result-set equal gold.
+    # Args also drive structural validity, read-only safety and tool correctness.
+    agent_mql_calls: list[dict[str, Any]] = []
+    agent_mql_results: list[dict[str, Any]] = []
 
-    def _on_tool_call(tool_name: str, _tool_args: dict, result_text: str) -> None:
+    def _on_tool_call(tool_name: str, tool_args: dict, result_text: str) -> None:
         nonlocal last_mql_result, mql_was_success, run_mql_call_count, run_mql_first_success
         if tool_name == "run_mql":
             run_mql_call_count += 1
-            is_success = _parse_mql_result(result_text) is not None
+            parsed = _parse_mql_result(result_text)
+            is_success = parsed is not None
+            agent_mql_calls.append(dict(tool_args))
+            agent_mql_results.append({"success": is_success, "result": parsed})
             if run_mql_call_count == 1 and is_success:
                 run_mql_first_success = True
             last_mql_result = result_text
@@ -474,6 +510,11 @@ async def _run_question(
         "natural_language_query": item["nl_query"],
         "mango_result": last_mql_result or error_detail or "",
         "reference_output": ref_output,
+        # --- New harness inputs (scored offline by scorecard.py) ---
+        "nl_answer": answer,                       # final NL answer (was discarded)
+        "agent_mql": agent_mql_calls,              # agent's generated QueryRequest(s)
+        "agent_results": agent_mql_results,        # parsed result-set per run_mql call
+        "gold_mql": item.get("gold_mql"),          # full structured gold query
         **metrics,
         "run_mql_calls": run_mql_call_count,
         "token_input": input_tokens,
@@ -507,6 +548,7 @@ async def run_benchmark(
     csv_path: str | None = None,
     mongo_kwargs: dict | None = None,
     training_file: str | None = None,
+    max_rows: int = 100_000,
 ) -> list[dict[str, Any]]:
     """Run the full benchmark and return all result rows."""
     # --- Load dataset ---
@@ -525,8 +567,16 @@ async def run_benchmark(
     out_dir = Path(results_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    csv_path = out_dir / f"results_{ts}.csv"
-    jsonl_path = out_dir / f"results_{ts}_debug.jsonl"
+    # Name files after the model under test + timestamp for quick identification.
+    # ("multi" when several models share one run — the per-row `model` column
+    # still distinguishes them.)
+    if len(models) == 1:
+        raw = models[0].get("model") or models[0]["provider"]
+    else:
+        raw = "multi"
+    model_slug = re.sub(r"[^A-Za-z0-9._-]+", "-", str(raw)).strip("-") or "model"
+    csv_path = out_dir / f"{model_slug}_{ts}.csv"
+    jsonl_path = out_dir / f"{model_slug}_{ts}_debug.jsonl"
 
     # --- Progress indicator ---
     try:
@@ -546,7 +596,9 @@ async def run_benchmark(
     with open(csv_path, "w", newline="", encoding="utf-8") as csv_f, \
          open(jsonl_path, "w", encoding="utf-8") as jsonl_f:
 
-        writer = csv.DictWriter(csv_f, fieldnames=_COLUMNS)
+        # extrasaction="ignore": the new harness fields (nl_answer, agent_mql,
+        # gold_mql) are debug-only and go to the JSONL, not the lean human CSV.
+        writer = csv.DictWriter(csv_f, fieldnames=_COLUMNS, extrasaction="ignore")
         writer.writeheader()
 
         for model_cfg in models:
@@ -579,6 +631,7 @@ async def run_benchmark(
                         max_iterations=max_iterations,
                         training_file=training_file,
                         mongo_kwargs=mongo_kwargs,
+                        max_rows=max_rows,
                     )
                     if training_file and base_agent.agent_memory is not None:
                         from mango.servers.cli.main import _load_training_file
@@ -747,6 +800,14 @@ def main() -> None:
         help="Max agent tool-call iterations per question.",
     )
     parser.add_argument(
+        "--max-rows",
+        type=int,
+        default=100_000,
+        help="RunMQLTool row cap for benchmark runs (default 100000, effectively "
+             "uncapped). Prevents one-sided truncation against the uncapped gold "
+             "result-set, which would false-FAIL large-result questions.",
+    )
+    parser.add_argument(
         "--no-memory",
         action="store_true",
         help="Disable ChromaDB memory layer.",
@@ -863,6 +924,7 @@ def main() -> None:
             csv_path=args.csv_path,
             mongo_kwargs=mongo_kwargs,
             training_file=args.training_file,
+            max_rows=args.max_rows,
         )
     )
 

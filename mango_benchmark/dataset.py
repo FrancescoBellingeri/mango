@@ -12,6 +12,57 @@ csv.field_size_limit(min(sys.maxsize, 2**31 - 1))
 
 _CSV_PATH = Path(__file__).parent / "atlas_sample_data_benchmark.braintrust.csv"
 
+# Canonical structured gold-MQL shape (mirrors mango.core.types.QueryRequest).
+_GOLD_MQL_KEYS = (
+    "operation",
+    "collection",
+    "filter",
+    "pipeline",
+    "projection",
+    "sort",
+    "limit",
+    "distinct_field",
+)
+
+
+def _parse_gold_mql(db_query: Any) -> dict[str, Any]:
+    """Normalise a CSV ``expected.dbQuery`` into a structured gold-MQL dict.
+
+    Two on-disk formats are supported:
+
+    * **Structured** (new ``ground_truth.py``): a dict already carrying an
+      ``operation`` key plus the full QueryRequest fields — used directly.
+    * **Legacy** (older CSVs, e.g. the bundled atlas dataset): only the query
+      *body* — a bare filter dict or a bare pipeline list. ``operation``/``sort``
+      are unknown; we surface what we can. A list body is a pipeline (so an
+      embedded ``$sort`` is still recoverable); a dict body is a filter.
+
+    Always returns a dict with all :data:`_GOLD_MQL_KEYS`. ``dbQuery`` is itself a
+    JSON string inside the ``expected`` column, so a string is parsed once more.
+    """
+    parsed: Any = db_query
+    if isinstance(db_query, str):
+        try:
+            parsed = json.loads(db_query)
+        except (ValueError, json.JSONDecodeError):
+            parsed = db_query  # leave as opaque string
+
+    gold: dict[str, Any] = {k: None for k in _GOLD_MQL_KEYS}
+
+    if isinstance(parsed, dict) and "operation" in parsed:
+        # Structured form — copy known keys, ignore extras.
+        for k in _GOLD_MQL_KEYS:
+            gold[k] = parsed.get(k)
+    elif isinstance(parsed, list):
+        # Legacy bare pipeline.
+        gold["pipeline"] = parsed
+    elif isinstance(parsed, dict):
+        # Legacy bare filter.
+        gold["filter"] = parsed
+    # else: unparseable — leave all None (scorer falls back to strict ordering).
+
+    return gold
+
 
 def load_dataset(
     csv_path: Path | str | None = None,
@@ -54,6 +105,7 @@ def load_dataset(
                 "nl_query": input_data["nlQuery"],
                 "db": input_data["databaseName"],
                 "mongo_query": expected_data["dbQuery"],
+                "gold_mql": _parse_gold_mql(expected_data["dbQuery"]),
                 "expected_result": expected_data.get("result"),
                 "tags": tags,
             })
