@@ -101,6 +101,7 @@ def _build_agent(
     training_file: str | None = None,
     mongo_kwargs: dict | None = None,
     max_rows: int = 100_000,
+    temperature: float | None = None,
 ) -> MangoAgent:
     """Build and return a ready MangoAgent connected to *db_name*.
 
@@ -110,7 +111,10 @@ def _build_agent(
     a false FAIL on the execution-accuracy metric. The gold side is uncapped, so
     capping only the agent side is a one-sided truncation.
     """
-    llm = build_llm(provider=provider, model=model, api_key=api_key, base_url=base_url)
+    llm = build_llm(
+        provider=provider, model=model, api_key=api_key, base_url=base_url,
+        temperature=temperature,
+    )
 
     db = MongoRunner()
     db.connect(_uri_for_db(mongo_uri, db_name), **(mongo_kwargs or {}))
@@ -549,6 +553,7 @@ async def run_benchmark(
     mongo_kwargs: dict | None = None,
     training_file: str | None = None,
     max_rows: int = 100_000,
+    temperature: float | None = None,
 ) -> list[dict[str, Any]]:
     """Run the full benchmark and return all result rows."""
     # --- Load dataset ---
@@ -567,16 +572,20 @@ async def run_benchmark(
     out_dir = Path(results_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    # Name files after the model under test + timestamp for quick identification.
-    # ("multi" when several models share one run — the per-row `model` column
-    # still distinguishes them.)
+    # Name files after model + database + timestamp for quick identification.
+    # ("multi" / "multi-db" when several models or databases share one run.)
     if len(models) == 1:
         raw = models[0].get("model") or models[0]["provider"]
     else:
         raw = "multi"
     model_slug = re.sub(r"[^A-Za-z0-9._-]+", "-", str(raw)).strip("-") or "model"
-    csv_path = out_dir / f"{model_slug}_{ts}.csv"
-    jsonl_path = out_dir / f"{model_slug}_{ts}_debug.jsonl"
+    dbs = sorted({item["db"] for item in dataset})
+    if len(dbs) == 1:
+        db_slug = re.sub(r"[^A-Za-z0-9._-]+", "-", dbs[0]).strip("-") or "db"
+    else:
+        db_slug = "multi-db"
+    out_csv_path = out_dir / f"{model_slug}_{db_slug}_{ts}.csv"
+    out_jsonl_path = out_dir / f"{model_slug}_{db_slug}_{ts}_debug.jsonl"
 
     # --- Progress indicator ---
     try:
@@ -593,8 +602,8 @@ async def run_benchmark(
     all_rows: list[dict[str, Any]] = []
     memory_dir = str(out_dir / ".benchmark_memory")
 
-    with open(csv_path, "w", newline="", encoding="utf-8") as csv_f, \
-         open(jsonl_path, "w", encoding="utf-8") as jsonl_f:
+    with open(out_csv_path, "w", newline="", encoding="utf-8") as csv_f, \
+         open(out_jsonl_path, "w", encoding="utf-8") as jsonl_f:
 
         # extrasaction="ignore": the new harness fields (nl_answer, agent_mql,
         # gold_mql) are debug-only and go to the JSONL, not the lean human CSV.
@@ -632,6 +641,7 @@ async def run_benchmark(
                         training_file=training_file,
                         mongo_kwargs=mongo_kwargs,
                         max_rows=max_rows,
+                        temperature=temperature,
                     )
                     if training_file and base_agent.agent_memory is not None:
                         from mango.servers.cli.main import _load_training_file
@@ -701,8 +711,8 @@ async def run_benchmark(
             if model_rows:
                 _print_model_summary(model_label, model_rows)
 
-    print(f"\nResults saved to: {csv_path}")
-    print(f"Debug log:        {jsonl_path}")
+    print(f"\nResults saved to: {out_csv_path}")
+    print(f"Debug log:        {out_jsonl_path}")
     return all_rows
 
 
@@ -808,6 +818,15 @@ def main() -> None:
              "result-set, which would false-FAIL large-result questions.",
     )
     parser.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        metavar="T",
+        help="Sampling temperature. Omit to use the provider default; set 0 for "
+             "(near-)deterministic ablation runs where the only behavioural delta "
+             "between two configs is the feature under test.",
+    )
+    parser.add_argument(
         "--no-memory",
         action="store_true",
         help="Disable ChromaDB memory layer.",
@@ -856,7 +875,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--api-key",
-        default=None,
+        default=os.getenv("REGOLO_API_KEY"),
         metavar="KEY",
         help=(
             "API key for the LLM provider. Overrides provider-specific env vars "
@@ -925,6 +944,7 @@ def main() -> None:
             mongo_kwargs=mongo_kwargs,
             training_file=args.training_file,
             max_rows=args.max_rows,
+            temperature=args.temperature,
         )
     )
 

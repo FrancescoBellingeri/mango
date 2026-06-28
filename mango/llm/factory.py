@@ -21,6 +21,7 @@ def build_llm(
     model: str | None = None,
     api_key: str | None = None,
     base_url: str | None = None,
+    temperature: float | None = None,
 ) -> LLMService:
     """Instantiate an LLMService for the given provider.
 
@@ -28,6 +29,8 @@ def build_llm(
         provider: One of ``"anthropic"``, ``"openai"``, ``"gemini"``.
         model: Model ID override. Uses the provider's default if omitted.
         api_key: API key override. Falls back to the provider's env variable if omitted.
+        temperature: Sampling temperature. ``None`` leaves the provider default
+            untouched; set ``0.0`` for (near-)deterministic ablation runs.
 
     Returns:
         A configured LLMService instance.
@@ -42,6 +45,8 @@ def build_llm(
             kwargs["model"] = model
         if api_key:
             kwargs["api_key"] = api_key
+        if temperature is not None:
+            kwargs["temperature"] = temperature
         return AnthropicLlmService(**kwargs)
 
     if provider == "openai":
@@ -58,6 +63,8 @@ def build_llm(
                 f"Model '{model}' is not a native OpenAI model. "
                 "Pass base_url for OpenAI-compatible providers (e.g. Together AI: https://api.together.xyz/v1)."
             )
+        if temperature is not None:
+            kwargs["temperature"] = temperature
         return OpenAILlmService(**kwargs)
 
     if provider == "gemini":
@@ -67,6 +74,8 @@ def build_llm(
             kwargs["model"] = model
         if api_key:
             kwargs["api_key"] = api_key
+        if temperature is not None:
+            kwargs["temperature"] = temperature
         return GeminiLlmService(**kwargs)
 
     raise ValueError(f"Unknown provider '{provider}'. Must be one of: {', '.join(PROVIDERS)}")

@@ -21,6 +21,7 @@ class AnthropicLlmService(LLMService):
         api_key: str | None = None,
         model: str = DEFAULT_MODEL,
         max_tokens: int = 4096,
+        temperature: float | None = None,
     ) -> None:
         try:
             import anthropic
@@ -31,6 +32,8 @@ class AnthropicLlmService(LLMService):
         self._client = anthropic.Anthropic(api_key=api_key)
         self._model = model
         self._max_tokens = max_tokens
+        # None → leave the API default untouched (current behaviour).
+        self._temperature = temperature
 
     @staticmethod
     def _build_input_schema(params: list[ToolParam]) -> dict:
@@ -93,6 +96,8 @@ class AnthropicLlmService(LLMService):
             "max_tokens": self._max_tokens,
             "messages": self._to_anthropic_messages(messages),
         }
+        if self._temperature is not None:
+            kwargs["temperature"] = self._temperature
         if system_prompt:
             kwargs["system"] = system_prompt
         if tools:

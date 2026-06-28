@@ -28,7 +28,7 @@ import os
 from bson import ObjectId
 from pymongo import MongoClient
 
-from mango_benchmark.seed.questions import QUESTIONS, BenchmarkQuestion
+from mango_benchmark.seed.questions import QUESTIONS, LITE_QUESTIONS, BenchmarkQuestion
 from mango_benchmark.seed.schema import DB_NAME
 
 from dotenv import load_dotenv
@@ -36,6 +36,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 DEFAULT_OUT = Path(__file__).parent.parent / "mango_ecommerce_benchmark.csv"
+DEFAULT_LITE_OUT = Path(__file__).parent.parent / "mango_ecommerce_benchmark_lite.csv"
 
 
 # ---------------------------------------------------------------------------
@@ -123,7 +124,8 @@ def _make_row(q: BenchmarkQuestion, result: Any, idx: int) -> dict[str, str]:
     }
 
 
-def build_ground_truth(uri: str, out_path: Path) -> None:
+def build_ground_truth(uri: str, out_path: Path, *, lite: bool = False) -> None:
+    questions = LITE_QUESTIONS if lite else QUESTIONS
     client: MongoClient = MongoClient(uri, serverSelectionTimeoutMS=5_000)
     client.admin.command("ping")
     db = client[DB_NAME]
@@ -135,12 +137,12 @@ def build_ground_truth(uri: str, out_path: Path) -> None:
 
     print(f"Connected to {DB_NAME} @ {uri}")
     print(f"Collections: {', '.join(sorted(col_names))}")
-    print(f"Processing {len(QUESTIONS)} questions...\n")
+    print(f"Processing {len(questions)} questions...\n")
 
     rows: list[dict] = []
     errors: list[tuple[int, str, str]] = []
 
-    for idx, q in enumerate(QUESTIONS, start=1):
+    for idx, q in enumerate(questions, start=1):
         label = f"Q{idx:03d}"
         try:
             result = _run_question(db, q)
@@ -187,11 +189,17 @@ def main() -> None:
     parser.add_argument("--uri", default=os.getenv("MONGODB_URI", "mongodb://localhost:27017"), help="MongoDB URI")
     parser.add_argument(
         "--out",
-        default=str(DEFAULT_OUT),
+        default=None,
         help="Output CSV path",
     )
+    parser.add_argument(
+        "--lite",
+        action="store_true",
+        help="Write the 50-question lite subset instead of the full 170-question set.",
+    )
     args = parser.parse_args()
-    build_ground_truth(uri=args.uri, out_path=Path(args.out))
+    out_path = Path(args.out) if args.out else (DEFAULT_LITE_OUT if args.lite else DEFAULT_OUT)
+    build_ground_truth(uri=args.uri, out_path=out_path, lite=args.lite)
 
 
 if __name__ == "__main__":

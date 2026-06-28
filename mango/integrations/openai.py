@@ -24,6 +24,7 @@ class OpenAILlmService(LLMService):
         model: str = DEFAULT_MODEL,
         max_completion_tokens: int = 4096,
         base_url: str | None = None,
+        temperature: float | None = None,
     ) -> None:
         try:
             from openai import OpenAI
@@ -34,6 +35,9 @@ class OpenAILlmService(LLMService):
         self._client = OpenAI(api_key=api_key, base_url=base_url)
         self._model = model
         self._max_completion_tokens = max_completion_tokens
+        # None → leave the endpoint default untouched (current behaviour).
+        # Set to 0.0 for (near-)deterministic runs used by ablations.
+        self._temperature = temperature
 
     @staticmethod
     def _build_parameters(params: list[ToolParam]) -> dict:
@@ -120,6 +124,8 @@ class OpenAILlmService(LLMService):
             "max_completion_tokens": self._max_completion_tokens,
             "messages": self._to_openai_messages(messages, system_prompt),
         }
+        if self._temperature is not None:
+            kwargs["temperature"] = self._temperature
         if tools:
             kwargs["tools"] = self._to_openai_tools(tools)
             kwargs["tool_choice"] = "auto"
