@@ -31,6 +31,7 @@ from mango.llm.factory import build_llm
 from mango.tools import (
     CollectionStatsTool,
     DescribeCollectionTool,
+    InspectFieldTool,
     ListCollectionsTool,
     RunMQLTool,
     SearchCollectionsTool,
@@ -123,6 +124,7 @@ def _build_agent(
     tools.register(ListCollectionsTool(db))
     tools.register(SearchCollectionsTool(db))
     tools.register(DescribeCollectionTool(db))
+    tools.register(InspectFieldTool(db))
     tools.register(CollectionStatsTool(db))
 
     agent_memory = None

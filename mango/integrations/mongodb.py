@@ -271,6 +271,84 @@ class MongoRunner(NoSQLRunner):
                 f"Cannot get indexes for '{collection}': {exc}"
             ) from exc
 
+    def profile_field(
+        self,
+        collection: str,
+        field: str,
+        top_k: int = 20,
+        sample_threshold: int = 2_000_000,
+        sample_size: int = 100_000,
+    ) -> dict:
+        """Profile the actual values stored in one field of a collection.
+
+        Returns the most frequent values (with counts), the distinct-value
+        cardinality, and a breakdown of the BSON types observed. This surfaces
+        what neither the inferred schema (types only) nor a 3-document sample can:
+        that a categorical field may store the same concept under different
+        encodings (``active`` vs ``ACTIVE``, ``true`` vs ``"yes"`` vs ``1``).
+
+        Exact by default. For collections above ``sample_threshold`` documents it
+        falls back to a ``$sample`` pass and flags ``sampled=True`` (rare values
+        may then be missed — the trade-off is documented to the caller).
+
+        ``field`` may be a dotted path (``a.b.c``). Each sub-aggregation degrades
+        gracefully: a backend that does not support a stage yields an empty part
+        rather than failing the whole call.
+
+        Raises:
+            BackendError: If the collection cannot be accessed at all.
+        """
+        try:
+            coll = self._database[collection]
+            total = coll.estimated_document_count()
+        except pymongo.errors.PyMongoError as exc:
+            raise BackendError(
+                f"Cannot profile '{field}' on '{collection}': {exc}"
+            ) from exc
+
+        sampled = total > sample_threshold
+        pre: list[dict] = [{"$sample": {"size": sample_size}}] if sampled else []
+        field_ref = f"${field}"
+
+        def _agg(stages: list[dict]) -> list[dict]:
+            try:
+                return list(coll.aggregate(pre + stages, allowDiskUse=True))
+            except Exception as exc:  # backend may lack a stage (e.g. mongomock)
+                logger.debug("profile_field sub-aggregation failed: %s", exc)
+                return []
+
+        top = _agg([
+            {"$group": {"_id": field_ref, "count": {"$sum": 1}}},
+            {"$sort": {"count": -1, "_id": 1}},
+            {"$limit": top_k},
+        ])
+        card = _agg([
+            {"$group": {"_id": field_ref}},
+            {"$count": "n"},
+        ])
+        types = _agg([
+            {"$group": {"_id": {"$type": field_ref}, "count": {"$sum": 1}}},
+            {"$sort": {"count": -1}},
+        ])
+
+        distinct_count = card[0]["n"] if card else len(top)
+        top_values = [
+            {"value": self._stringify_bson(g["_id"]), "count": g["count"]}
+            for g in top
+        ]
+        type_breakdown = {t["_id"]: t["count"] for t in types if t.get("_id")}
+
+        return {
+            "collection": collection,
+            "field": field,
+            "scanned_docs": sample_size if sampled else total,
+            "sampled": sampled,
+            "distinct_count": distinct_count,
+            "type_breakdown": type_breakdown,
+            "top_values": top_values,
+            "truncated": distinct_count > len(top_values),
+        }
+
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------

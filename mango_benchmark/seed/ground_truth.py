@@ -76,6 +76,57 @@ def _query_to_json(q: BenchmarkQuestion) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _key_tuple(row: dict, keys: list[str]) -> tuple:
+    return tuple(row.get(k) for k in keys)
+
+
+def _boundary_tie(rows: list[dict], limit: int, keys: list[str]) -> bool:
+    """True when a ``$limit`` cuts through a group of equal-sort-key rows.
+
+    The row just inside the cut (index ``limit-1``) ties, on the sort keys, with
+    the row just outside (index ``limit``). When that happens, "top-N" has more
+    than one valid answer and re-generating the gold yields a different set — so
+    the query needs a unique tie-breaker to be well-posed. A clean cut (no tie at
+    the boundary) is left untouched, preserving the scorer's tie-aware comparison.
+    """
+    if len(rows) <= limit:
+        return False
+    return _key_tuple(rows[limit - 1], keys) == _key_tuple(rows[limit], keys)
+
+
+def _agg_tiebreak(col: Any, pipeline: list[dict]) -> list[dict]:
+    """Append ``_id`` as a deterministic final sort key to a sort→limit pipeline,
+    but only when the limit actually cuts a tie group. Mutates the ``$sort`` stage
+    in place so the serialised gold query reflects the tie-breaker. No-op otherwise.
+    """
+    sort_idx = next((i for i, s in enumerate(pipeline) if isinstance(s, dict) and "$sort" in s), None)
+    limit_idx = next((i for i, s in enumerate(pipeline) if isinstance(s, dict) and "$limit" in s), None)
+    if sort_idx is None or limit_idx is None or limit_idx < sort_idx:
+        return pipeline
+    sort_spec = pipeline[sort_idx]["$sort"]
+    if "_id" in sort_spec:
+        return pipeline
+    limit_n = pipeline[limit_idx]["$limit"]
+    # Probe the rows around the boundary BEFORE any later $project, where the sort
+    # keys are still present. Same prefix + one extra row past the limit.
+    probe = list(col.aggregate(pipeline[:limit_idx] + [{"$limit": limit_n + 1}], allowDiskUse=True))
+    if _boundary_tie(probe, limit_n, list(sort_spec.keys())):
+        pipeline[sort_idx]["$sort"] = {**sort_spec, "_id": 1}
+    return pipeline
+
+
+def _find_sort_tiebreak(col: Any, q: BenchmarkQuestion) -> dict | None:
+    """Return ``q.sort`` plus ``_id`` when a sort+limit find cuts a tie at the
+    boundary; otherwise ``q.sort`` unchanged."""
+    if not (q.sort and q.limit) or "_id" in q.sort:
+        return q.sort
+    # Probe full documents (no projection) so the sort keys are always present.
+    probe = list(col.find(q.query).sort(list(q.sort.items())).limit(q.limit + 1))
+    if _boundary_tie(probe, q.limit, list(q.sort.keys())):
+        return {**q.sort, "_id": 1}
+    return q.sort
+
+
 def _run_question(db: Any, q: BenchmarkQuestion) -> Any:
     """Execute the question against MongoDB and return a JSON-safe result."""
     col = db[q.collection]
@@ -89,15 +140,17 @@ def _run_question(db: Any, q: BenchmarkQuestion) -> Any:
         return sorted([_serialize(v) for v in values])
 
     if q.operation == "find":
+        sort = _find_sort_tiebreak(col, q)
         cursor = col.find(q.query, q.projection or {})
-        if q.sort:
-            cursor = cursor.sort(list(q.sort.items()))
+        if sort:
+            cursor = cursor.sort(list(sort.items()))
         if q.limit:
             cursor = cursor.limit(q.limit)
         return [_serialize(doc) for doc in cursor]
 
     if q.operation == "aggregate":
-        docs = list(col.aggregate(q.query, allowDiskUse=True))
+        pipeline = _agg_tiebreak(col, q.query)
+        docs = list(col.aggregate(pipeline, allowDiskUse=True))
         return [_serialize(doc) for doc in docs]
 
     raise ValueError(f"Unknown operation: {q.operation!r}")
