@@ -4,10 +4,12 @@ These tools allow the LLM to autonomously save and retrieve interactions
 from the agent memory, following the same pattern as Vanna AI's memory system.
 
 Tools defined here:
-    - search_saved_correct_tool_uses : search memory for similar past interactions
-    - save_question_tool_args        : save a successful (question → tool call) pair
-    - save_text_memory               : save free-form text (schema notes, business context)
-    - delete_last_memory_entry       : delete the last auto-saved entry (user feedback)
+    - save_question_tool_args  : save a successful (question → tool call) pair
+    - save_text_memory         : save free-form text (schema notes, business context)
+    - delete_last_memory_entry : delete the last auto-saved entry (user feedback)
+
+Note: memory retrieval is handled automatically by the agent in Python before
+each LLM call (_prepare_turn), so no LLM-facing search tool is needed.
 """
 
 from __future__ import annotations
@@ -18,56 +20,6 @@ from mango.integrations.chromadb import make_entry_id
 from mango.llm import ToolDef, ToolParam
 from mango.memory import MemoryEntry, MemoryService
 from mango.tools.base import Tool, ToolResult
-
-
-class SearchSavedCorrectToolUsesTool(Tool):
-    """Let the LLM search memory for similar past interactions before answering."""
-
-    def __init__(self, memory: MemoryService) -> None:
-        self._memory = memory
-
-    @property
-    def definition(self) -> ToolDef:
-        return ToolDef(
-            name="search_saved_correct_tool_uses",
-            description=(
-                "Search memory for similar past interactions before answering a question. "
-                "Call this at the START of every question to find relevant examples "
-                "of how similar questions were answered before. "
-                "Use the results to guide your tool selection and arguments."
-            ),
-            params=[
-                ToolParam(
-                    name="question",
-                    type="string",
-                    description="The user question to search similar past interactions for.",
-                ),
-            ],
-        )
-
-    async def execute(self, **kwargs: Any) -> ToolResult:
-        try:
-            entries = await self._memory.retrieve(
-                question=kwargs["question"],
-                top_k=5,
-                similarity_threshold=0.6,
-            )
-            if not entries:
-                return ToolResult(success=True, data={"results": [], "count": 0})
-
-            results = [
-                {
-                    "question": e.question,
-                    "tool_name": e.tool_name,
-                    "tool_args": e.tool_args,
-                    "result_summary": e.result_summary,
-                    "similarity": round(e.similarity, 2),
-                }
-                for e in entries
-            ]
-            return ToolResult(success=True, data={"results": results, "count": len(results)})
-        except Exception as exc:
-            return ToolResult(success=False, error=str(exc))
 
 
 class SaveQuestionToolArgsTool(Tool):

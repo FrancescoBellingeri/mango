@@ -33,7 +33,6 @@ logger = logging.getLogger(__name__)
 
 # Tool names that should never be auto-saved to memory.
 _MEMORY_TOOL_NAMES: frozenset[str] = frozenset({
-    "search_saved_correct_tool_uses",
     "save_question_tool_args",
     "save_text_memory",
 })

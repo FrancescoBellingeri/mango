@@ -130,7 +130,7 @@ def _build_agent(
     agent_memory = None
     if memory_enabled:
         from mango.integrations.chromadb import ChromaAgentMemory
-        from mango.tools import SaveTextMemoryTool, SearchSavedCorrectToolUsesTool
+        from mango.tools import SaveTextMemoryTool
 
         safe_label = (model or provider).replace("/", "_").replace(":", "_")
         training_tag = "_trained" if training_file else ""
@@ -140,7 +140,6 @@ def _build_agent(
             persist_dir=persist_dir,
         )
 
-        tools.register(SearchSavedCorrectToolUsesTool(agent_memory))
         tools.register(SaveTextMemoryTool(agent_memory))
 
     tools.register(RunMQLTool(db, max_rows=max_rows))

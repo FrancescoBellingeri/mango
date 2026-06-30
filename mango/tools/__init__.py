@@ -20,7 +20,7 @@ from mango.tools.mongo_tools import (
     SearchCollectionsTool,
     build_mongo_tools,
 )
-from mango.tools.memory_tools import SearchSavedCorrectToolUsesTool, SaveQuestionToolArgsTool, SaveTextMemoryTool, DeleteLastMemoryEntryTool
+from mango.tools.memory_tools import SaveQuestionToolArgsTool, SaveTextMemoryTool, DeleteLastMemoryEntryTool
 from mango.tools.base import Tool, ToolResult, ToolRegistry
 from mango.tools.validator import MQLValidator, ValidationResult
 
@@ -36,7 +36,6 @@ __all__ = [
     "RunMQLTool",
     "ExplainQueryTool",
     "build_mongo_tools",
-    "SearchSavedCorrectToolUsesTool",
     "SaveQuestionToolArgsTool",
     "SaveTextMemoryTool",
     "DeleteLastMemoryEntryTool",
