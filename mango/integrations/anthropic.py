@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from mango.llm import LLMResponse, LLMService, Message, ToolCall, ToolDef, ToolParam
+from mango.llm import LLMResponse, LLMService, Message, SystemPromptPart, ToolCall, ToolDef, ToolParam
 
 
 class AnthropicLlmService(LLMService):
@@ -21,6 +21,7 @@ class AnthropicLlmService(LLMService):
         api_key: str | None = None,
         model: str = DEFAULT_MODEL,
         max_tokens: int = 4096,
+        temperature: float | None = None,
     ) -> None:
         try:
             import anthropic
@@ -31,6 +32,8 @@ class AnthropicLlmService(LLMService):
         self._client = anthropic.Anthropic(api_key=api_key)
         self._model = model
         self._max_tokens = max_tokens
+        # None → leave the API default untouched (current behaviour).
+        self._temperature = temperature
 
     @staticmethod
     def _build_input_schema(params: list[ToolParam]) -> dict:
@@ -87,13 +90,27 @@ class AnthropicLlmService(LLMService):
         messages: list[Message],
         tools: list[ToolDef],
         system_prompt: str = "",
+        system_prompt_parts: list[SystemPromptPart] | None = None,
     ) -> LLMResponse:
         kwargs: dict = {
             "model": self._model,
             "max_tokens": self._max_tokens,
             "messages": self._to_anthropic_messages(messages),
         }
-        if system_prompt:
+        if self._temperature is not None:
+            kwargs["temperature"] = self._temperature
+        if system_prompt_parts:
+            blocks = []
+            for part in system_prompt_parts:
+                if not part.text:
+                    continue
+                block: dict = {"type": "text", "text": part.text}
+                if part.cacheable:
+                    block["cache_control"] = {"type": "ephemeral"}
+                blocks.append(block)
+            if blocks:
+                kwargs["system"] = blocks
+        elif system_prompt:
             kwargs["system"] = system_prompt
         if tools:
             kwargs["tools"] = self._to_anthropic_tools(tools)

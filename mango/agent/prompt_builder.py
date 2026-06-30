@@ -72,6 +72,13 @@ def _rules_section() -> str:
         "If a query returns no results, explain why (wrong filter, empty collection, etc.).",
         "If the question is ambiguous, ask one clarifying question before querying.",
         "Limit results to a sensible number (≤100 rows). Never fetch unbounded results.",
+        "Before filtering or grouping on a categorical field by a specific value, call "
+        "inspect_field to confirm how its values are actually encoded — exact spelling, "
+        "casing and data type — instead of assuming. If the same concept appears under "
+        "more than one form, match all of them (e.g. $in, or a case-insensitive $regex). "
+        "inspect_field is only a diagnostic to inform the filter: it is capped and may be "
+        "sampled, so NEVER answer from its output — always compute the final answer by "
+        "executing the query with run_mql.",
         "When filtering on date fields, check the actual format in the sample documents first. "
         "Dates may be stored as strings without timezone (e.g. '2024-11-22T08:29:28.225') — "
         "match the exact format, do not add 'Z' or timezone suffixes unless present in the data.",

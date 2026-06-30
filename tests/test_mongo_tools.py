@@ -9,6 +9,7 @@ import pytest
 from mango.core.types import FieldInfo, SchemaInfo
 from mango.tools.mongo_tools import (
     DescribeCollectionTool,
+    InspectFieldTool,
     ListCollectionsTool,
     RunMQLTool,
 )
@@ -175,3 +176,70 @@ class TestRunMQLTool:
     def test_definition_name(self, mongo_backend):
         tool = RunMQLTool(mongo_backend)
         assert tool.definition.name == "run_mql"
+
+
+# ---------------------------------------------------------------------------
+# InspectFieldTool
+# ---------------------------------------------------------------------------
+
+
+def _seed_drift(mongo_backend):
+    """Insert a collection whose 'status' field carries value drift."""
+    db = mongo_backend._db
+    db["accounts"].insert_many(
+        [{"status": "active"} for _ in range(8)]
+        + [{"status": "ACTIVE"} for _ in range(2)]
+        + [{"status": "inactive"}]
+        + [{"tier": {"name": "gold"}}, {"tier": {"name": "gold"}}, {"tier": {"name": "silver"}}]
+    )
+
+
+class TestInspectFieldTool:
+    async def test_reveals_value_drift_ordered_by_frequency(self, mongo_backend):
+        _seed_drift(mongo_backend)
+        tool = InspectFieldTool(mongo_backend)
+        result = await tool.execute(collection="accounts", field="status")
+        assert result.success is True
+        vals = {v["value"]: v["count"] for v in result.data["top_values"]}
+        # Both encodings surface with their real counts — the whole point.
+        assert vals.get("active") == 8
+        assert vals.get("ACTIVE") == 2
+        # Ordered by frequency descending.
+        counts = [v["count"] for v in result.data["top_values"]]
+        assert counts == sorted(counts, reverse=True)
+
+    async def test_payload_shape(self, mongo_backend):
+        _seed_drift(mongo_backend)
+        tool = InspectFieldTool(mongo_backend)
+        result = await tool.execute(collection="accounts", field="status")
+        data = result.data
+        for key in ("collection", "field", "distinct_count", "type_breakdown",
+                    "top_values", "truncated", "sampled", "scanned_docs"):
+            assert key in data
+        assert data["distinct_count"] >= 3  # active, ACTIVE, inactive (+ missing)
+
+    async def test_dotted_path(self, mongo_backend):
+        _seed_drift(mongo_backend)
+        tool = InspectFieldTool(mongo_backend)
+        result = await tool.execute(collection="accounts", field="tier.name")
+        vals = {v["value"]: v["count"] for v in result.data["top_values"]}
+        assert vals.get("gold") == 2
+        assert vals.get("silver") == 1
+
+    async def test_top_k_limits_and_flags_truncation(self, mongo_backend):
+        db = mongo_backend._db
+        db["many"].insert_many([{"v": f"val{i}"} for i in range(10)])
+        tool = InspectFieldTool(mongo_backend)
+        result = await tool.execute(collection="many", field="v", top_k=3)
+        assert len(result.data["top_values"]) == 3
+        assert result.data["distinct_count"] == 10
+        assert result.data["truncated"] is True
+
+    async def test_missing_args_returns_error(self, mongo_backend):
+        tool = InspectFieldTool(mongo_backend)
+        result = await tool.execute(collection="accounts")
+        assert result.success is False
+
+    def test_definition_name(self, mongo_backend):
+        tool = InspectFieldTool(mongo_backend)
+        assert tool.definition.name == "inspect_field"

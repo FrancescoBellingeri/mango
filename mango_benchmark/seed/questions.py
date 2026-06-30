@@ -2105,3 +2105,24 @@ QUESTIONS: list[BenchmarkQuestion] = (
 )
 
 assert len(QUESTIONS) == 170, f"Expected 170 questions, got {len(QUESTIONS)}"
+
+# 50-question lite subset: proportional sample across categories / difficulty.
+LITE_QUESTIONS: list[BenchmarkQuestion] = (
+    _Q_COUNTS[:5]
+    + _Q_FIELD_ACCESS[:4]
+    + _Q_DATE[:4]
+    + _Q_ARRAY[:3]
+    + _Q_AGGREGATION[:6]
+    + _Q_LOOKUP[:5]
+    + _Q_HARD[:5]
+    + _Q_EVENTS[:4]
+    + _Q_SHIPMENTS[:3]
+    + _Q_INVENTORY[:3]
+    + _Q_REVIEWS[:2]
+    + _Q_PRODUCTS[:2]
+    + _Q_CUSTOMERS[:2]
+    + _Q_DATE_EXT[:1]
+    + _Q_MULTI[:1]
+)
+
+assert len(LITE_QUESTIONS) == 50, f"Expected 50 lite questions, got {len(LITE_QUESTIONS)}"

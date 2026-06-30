@@ -18,7 +18,7 @@ import logging
 import os
 from typing import Any
 
-from mango.llm import LLMResponse, LLMService, Message, ToolCall, ToolDef, ToolParam
+from mango.llm import LLMResponse, LLMService, Message, SystemPromptPart, ToolCall, ToolDef, ToolParam
 
 logger = logging.getLogger(__name__)
 
@@ -185,9 +185,15 @@ class GeminiLlmService(LLMService):
         messages: list[Message],
         tools: list[ToolDef],
         system_prompt: str = "",
+        system_prompt_parts: list[SystemPromptPart] | None = None,
     ) -> LLMResponse:
         types = self._types
-        system_instruction, contents = self._to_gemini_contents(messages, system_prompt, types)
+        effective_prompt = (
+            "\n\n".join(p.text for p in system_prompt_parts if p.text)
+            if system_prompt_parts
+            else system_prompt
+        )
+        system_instruction, contents = self._to_gemini_contents(messages, effective_prompt, types)
 
         config_kwargs: dict[str, Any] = {
             "temperature": self._temperature,

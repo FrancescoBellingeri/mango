@@ -59,7 +59,7 @@ def pytest_collection_modifyitems(
 
 from mango.integrations.mongodb import MongoRunner as MongoBackend
 from mango.llm.base import LLMService
-from mango.llm.models import LLMResponse, Message, ToolDef
+from mango.llm.models import LLMResponse, Message, SystemPromptPart, ToolDef
 from mango.integrations.chromadb import ChromaAgentMemory as ChromaMemoryService
 from mango.tools.base import ToolRegistry
 from mango.tools.mongo_tools import build_mongo_tools
@@ -131,11 +131,17 @@ class MockLLMService(LLMService):
         messages: list[Message],
         tools: list[ToolDef],
         system_prompt: str = "",
+        system_prompt_parts: list[SystemPromptPart] | None = None,
     ) -> LLMResponse:
+        effective_prompt = (
+            "\n\n".join(p.text for p in system_prompt_parts if p.text)
+            if system_prompt_parts
+            else system_prompt
+        )
         self.calls.append({
             "messages": messages,
             "tools": tools,
-            "system_prompt": system_prompt,
+            "system_prompt": effective_prompt,
         })
         resp = self._responses[self._index]
         self._index += 1

@@ -182,6 +182,75 @@ class DescribeCollectionTool(Tool):
 
 
 # ---------------------------------------------------------------------------
+# inspect_field
+# ---------------------------------------------------------------------------
+
+
+class InspectFieldTool(Tool):
+    """Profile the real values of one field: top values, counts, types."""
+
+    def __init__(self, backend: MongoRunner) -> None:
+        self._backend = backend
+
+    @property
+    def definition(self) -> ToolDef:
+        return ToolDef(
+            name="inspect_field",
+            description=(
+                "Show the actual values stored in a single field: the most frequent "
+                "values with their counts, how many distinct values exist, and which "
+                "data types appear. Use this BEFORE filtering or grouping on a "
+                "categorical field, to confirm how its values are really encoded "
+                "instead of guessing. It reveals things the schema and sample "
+                "documents cannot — e.g. the same concept stored under different "
+                "casing or spelling ('active' vs 'ACTIVE'), or a flag stored with "
+                "mixed types (true vs 'yes' vs 1). If a field has very many distinct "
+                "values it is likely free-text/an identifier, not a category to "
+                "filter by an exact value. Accepts a dotted path for nested fields "
+                "(e.g. 'attributes.organic'). "
+                "This is a DIAGNOSTIC tool only: its output is capped at top_k and "
+                "may be sampled, so it is NOT the answer — even when it looks like "
+                "the breakdown you need. Always produce the final answer by running "
+                "the actual query with run_mql; use inspect_field only to decide how "
+                "to write the filter."
+            ),
+            params=[
+                ToolParam(
+                    name="collection",
+                    type="string",
+                    description="Collection to inspect.",
+                ),
+                ToolParam(
+                    name="field",
+                    type="string",
+                    description="Field name or dotted path to profile (e.g. 'status' or 'details.network').",
+                ),
+                ToolParam(
+                    name="top_k",
+                    type="integer",
+                    description="How many of the most frequent values to return. Defaults to 20.",
+                    required=False,
+                ),
+            ],
+        )
+
+    async def execute(self, **kwargs: Any) -> ToolResult:
+        collection = kwargs.get("collection")
+        field = kwargs.get("field")
+        if not collection or not field:
+            return ToolResult(
+                success=False,
+                error="inspect_field requires both 'collection' and 'field'.",
+            )
+        top_k = int(kwargs.get("top_k") or 20)
+        try:
+            data = self._backend.profile_field(collection, field, top_k=top_k)
+        except Exception as exc:
+            return ToolResult(success=False, error=str(exc))
+        return ToolResult(success=True, data=data)
+
+
+# ---------------------------------------------------------------------------
 # collection_stats
 # ---------------------------------------------------------------------------
 
@@ -831,6 +900,7 @@ def build_mongo_tools(
         ListCollectionsTool(backend),
         SearchCollectionsTool(backend),
         DescribeCollectionTool(backend),
+        InspectFieldTool(backend),
         CollectionStatsTool(backend),
         RunMQLTool(backend, max_rows=max_rows, validate=validate),
     ]

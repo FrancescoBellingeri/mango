@@ -25,7 +25,7 @@ import re
 from mango.agent.prompt_builder import build_system_prompt, schema_section_for_query, _FULL_SCHEMA_THRESHOLD
 from mango.nosql_runner import NoSQLRunner
 from mango.core.types import SchemaInfo
-from mango.llm import LLMService, Message
+from mango.llm import LLMService, Message, SystemPromptPart
 from mango.memory import MemoryEntry, MemoryService, make_entry_id
 from mango.tools import ToolRegistry
 
@@ -33,7 +33,6 @@ logger = logging.getLogger(__name__)
 
 # Tool names that should never be auto-saved to memory.
 _MEMORY_TOOL_NAMES: frozenset[str] = frozenset({
-    "search_saved_correct_tool_uses",
     "save_question_tool_args",
     "save_text_memory",
 })
@@ -239,9 +238,9 @@ class MangoAgent:
         Returns:
             AgentResponse with the answer and metadata.
         """
-        memory_hits, system_prompt = await self._prepare_turn(question)
+        memory_hits, system_prompt_parts = await self._prepare_turn(question)
 
-        async for event in self._run_loop(question, system_prompt, memory_hits):
+        async for event in self._run_loop(question, system_prompt_parts, memory_hits):
             if event["type"] == "tool_result" and on_tool_call:
                 on_tool_call(
                     event["tool_name"],
@@ -279,9 +278,9 @@ class MangoAgent:
                "retries_made": int}``
         - ``{"type": "error", "message": str}``
         """
-        memory_hits, system_prompt = await self._prepare_turn(question)
+        memory_hits, system_prompt_parts = await self._prepare_turn(question)
 
-        async for event in self._run_loop(question, system_prompt, memory_hits):
+        async for event in self._run_loop(question, system_prompt_parts, memory_hits):
             if event["type"] == "tool_call":
                 yield {"type": "tool_call", "tool_name": event["tool_name"], "tool_args": event["tool_args"]}
             elif event["type"] == "tool_result":
@@ -401,14 +400,16 @@ class MangoAgent:
             ) + "\n\n"
 
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S UTC")
-        system_prompt = f"Current datetime: {now}\n\n{memory_context}{self._system_prompt}\n\n{schema_section}"
-
-        return memory_hits, system_prompt
+        dynamic = f"Current datetime: {now}\n\n{memory_context}{schema_section}".rstrip()
+        return memory_hits, [
+            SystemPromptPart(text=self._system_prompt, cacheable=True),
+            SystemPromptPart(text=dynamic, cacheable=False),
+        ]
 
     async def _run_loop(
         self,
         question: str,
-        system_prompt: str,
+        system_prompt_parts: list[SystemPromptPart],
         memory_hits: int,
     ) -> AsyncGenerator[dict, None]:
         """Core LLM ↔ tool loop. Yields typed event dicts.
@@ -425,6 +426,7 @@ class MangoAgent:
         iterations = 0
         retry_count = 0
         inspected_collections: set[str] = set()
+        pending_memory: MemoryEntry | None = None
 
         while iterations < self._max_iterations:
             iterations += 1
@@ -432,7 +434,7 @@ class MangoAgent:
             response = self._llm.chat(
                 messages=self._conversation,
                 tools=self._registry.get_definitions(),
-                system_prompt=system_prompt,
+                system_prompt_parts=system_prompt_parts,
             )
 
             total_input_tokens += response.input_tokens
@@ -441,6 +443,7 @@ class MangoAgent:
             if not response.has_tool_calls:
                 answer = response.text or ""
                 self._conversation.append(Message(role="assistant", content=answer))
+                await self._commit_memory(pending_memory)
                 yield {
                     "type": "answer",
                     "text": answer,
@@ -503,8 +506,14 @@ class MangoAgent:
                 logger.debug("Tool result (%s): %.200s…", tc.tool_name, result_text)
 
                 if result.success:
-                    if tc.tool_name not in _MEMORY_TOOL_NAMES:
-                        await self._auto_store_memory(question, tc.tool_name, tc.tool_args, result_text)
+                    if tc.tool_name == "run_mql":
+                        pending_memory = MemoryEntry(
+                            id=make_entry_id(),
+                            question=question,
+                            tool_name=tc.tool_name,
+                            tool_args=tc.tool_args,
+                            result_summary=result_text[:300],
+                        )
                     retry_count = 0
                 else:
                     error_msg = result.error or result_text
@@ -543,10 +552,11 @@ class MangoAgent:
         response = self._llm.chat(
             messages=self._conversation,
             tools=[],
-            system_prompt=system_prompt,
+            system_prompt_parts=system_prompt_parts,
         )
         answer = response.text or "I reached the maximum number of steps. Please try rephrasing your question."
         self._conversation.append(Message(role="assistant", content=answer))
+        await self._commit_memory(pending_memory)
         yield {
             "type": "answer",
             "text": answer,
@@ -575,24 +585,13 @@ class MangoAgent:
         self._conversation = self._conversation[cutoff:]
         logger.debug("Pruned %d messages (%d turns removed).", cutoff, excess)
 
-    async def _auto_store_memory(
-        self, question: str, tool_name: str, tool_args: dict, result_text: str
-    ) -> None:
-        """Automatically persist a successful tool call to memory."""
-        if self._memory is None:
+    async def _commit_memory(self, entry: MemoryEntry | None) -> None:
+        """Persist the final run_mql entry to memory. No-op if entry is None or memory disabled."""
+        if self._memory is None or entry is None:
             return
-
-        entry = MemoryEntry(
-            id=make_entry_id(),
-            question=question,
-            tool_name=tool_name,
-            tool_args=tool_args,
-            result_summary=result_text[:300],
-        )
-
         try:
             await self._memory.store(entry)
             self._last_memory_entry_id = entry.id
-            logger.info("Auto-saved memory entry: %s(%s)", tool_name, str(tool_args)[:60])
+            logger.info("Auto-saved memory entry: %s(%s)", entry.tool_name, str(entry.tool_args)[:60])
         except Exception as exc:
             logger.warning("Failed to auto-save memory entry: %s", exc)

@@ -77,3 +77,17 @@ class Message:
     role: str           # 'user', 'assistant', 'tool'
     content: str | list[dict[str, Any]]
     tool_call_id: str | None = None     # only for role='tool'
+
+
+@dataclass
+class SystemPromptPart:
+    """A segment of the system prompt, optionally marked for provider-side caching.
+
+    Providers that support explicit caching (Anthropic) apply cache_control on
+    parts where cacheable=True. Providers without explicit caching (OpenAI, Gemini,
+    Ollama) concatenate all parts — prefix stability alone activates automatic
+    caching where supported.
+    """
+
+    text: str
+    cacheable: bool = False

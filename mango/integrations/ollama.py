@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from mango.llm import LLMResponse, LLMService, Message, ToolCall, ToolDef, ToolParam
+from mango.llm import LLMResponse, LLMService, Message, SystemPromptPart, ToolCall, ToolDef, ToolParam
 
 
 class OllamaLlmService(LLMService):
@@ -108,10 +108,16 @@ class OllamaLlmService(LLMService):
         messages: list[Message],
         tools: list[ToolDef],
         system_prompt: str = "",
+        system_prompt_parts: list[SystemPromptPart] | None = None,
     ) -> LLMResponse:
+        effective_prompt = (
+            "\n\n".join(p.text for p in system_prompt_parts if p.text)
+            if system_prompt_parts
+            else system_prompt
+        )
         kwargs: dict = {
             "model": self._model,
-            "messages": self._to_ollama_messages(messages, system_prompt),
+            "messages": self._to_ollama_messages(messages, effective_prompt),
             "options": {"num_predict": self._max_tokens},
         }
         if tools:

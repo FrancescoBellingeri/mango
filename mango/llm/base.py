@@ -7,7 +7,7 @@ The agent always talks to an LLMService — never to a provider SDK directly.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from mango.llm.models import Message, ToolDef, LLMResponse
+from mango.llm.models import Message, ToolDef, LLMResponse, SystemPromptPart
 
 
 # ---------------------------------------------------------------------------
@@ -28,6 +28,7 @@ class LLMService(ABC):
         messages: list[Message],
         tools: list[ToolDef],
         system_prompt: str = "",
+        system_prompt_parts: list[SystemPromptPart] | None = None,
     ) -> LLMResponse:
         """Send a conversation turn to the LLM and return its response.
 
