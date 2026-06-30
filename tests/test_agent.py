@@ -206,6 +206,79 @@ class TestAgentMemory:
         await agent.ask("How many users?")
         assert memory.count() == 1
 
+    async def test_intermediate_tools_not_stored(
+        self, MockLLM, mongo_backend, tool_registry
+    ):
+        """describe_collection + run_mql → only the run_mql entry saved."""
+        memory = _fresh_memory()
+        responses = [
+            LLMResponse(
+                text=None,
+                tool_calls=[ToolCall("describe_collection", {"collection": "users"}, "tc-1")],
+            ),
+            LLMResponse(
+                text=None,
+                tool_calls=[
+                    ToolCall(
+                        tool_name="run_mql",
+                        tool_args={"operation": "count", "collection": "users"},
+                        tool_call_id="tc-2",
+                    )
+                ],
+            ),
+            LLMResponse(text="3 users.", tool_calls=[]),
+        ]
+        agent, _ = _agent(MockLLM, mongo_backend, tool_registry, responses, memory=memory)
+        await agent.ask("How many users?")
+        assert memory.count() == 1
+
+    async def test_only_last_run_mql_stored(
+        self, MockLLM, mongo_backend, tool_registry
+    ):
+        """Multiple run_mql calls → only the last successful one is stored."""
+        memory = _fresh_memory()
+        responses = [
+            LLMResponse(
+                text=None,
+                tool_calls=[
+                    ToolCall("run_mql", {"operation": "find", "collection": "users"}, "tc-1")
+                ],
+            ),
+            LLMResponse(
+                text=None,
+                tool_calls=[
+                    ToolCall("run_mql", {"operation": "count", "collection": "users"}, "tc-2")
+                ],
+            ),
+            LLMResponse(text="3 users.", tool_calls=[]),
+        ]
+        agent, _ = _agent(MockLLM, mongo_backend, tool_registry, responses, memory=memory)
+        await agent.ask("How many users?")
+        assert memory.count() == 1
+        # The stored entry is the last run_mql (count), not the first (find).
+        stored = memory._collection.get()
+        assert stored["metadatas"][0]["tool_name"] == "run_mql"
+        import json
+        assert json.loads(stored["metadatas"][0]["tool_args"])["operation"] == "count"
+
+    async def test_failed_run_mql_not_stored(
+        self, MockLLM, mongo_backend, tool_registry
+    ):
+        """A failing run_mql (invalid collection) produces no memory entry."""
+        memory = _fresh_memory()
+        responses = [
+            LLMResponse(
+                text=None,
+                tool_calls=[
+                    ToolCall("run_mql", {"operation": "find", "collection": "ghost"}, "tc-1")
+                ],
+            ),
+            LLMResponse(text="Could not find data.", tool_calls=[]),
+        ]
+        agent, _ = _agent(MockLLM, mongo_backend, tool_registry, responses, memory=memory)
+        await agent.ask("Find stuff?")
+        assert memory.count() == 0
+
     async def test_memory_hits_reported(self, MockLLM, mongo_backend, tool_registry):
         memory = _fresh_memory()
         # Pre-populate memory with a similar entry.

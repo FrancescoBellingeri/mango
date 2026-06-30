@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from mango.llm import LLMResponse, LLMService, Message, ToolCall, ToolDef, ToolParam
+from mango.llm import LLMResponse, LLMService, Message, SystemPromptPart, ToolCall, ToolDef, ToolParam
 
 
 class OpenAILlmService(LLMService):
@@ -118,11 +118,17 @@ class OpenAILlmService(LLMService):
         messages: list[Message],
         tools: list[ToolDef],
         system_prompt: str = "",
+        system_prompt_parts: list[SystemPromptPart] | None = None,
     ) -> LLMResponse:
+        effective_prompt = (
+            "\n\n".join(p.text for p in system_prompt_parts if p.text)
+            if system_prompt_parts
+            else system_prompt
+        )
         kwargs: dict = {
             "model": self._model,
             "max_completion_tokens": self._max_completion_tokens,
-            "messages": self._to_openai_messages(messages, system_prompt),
+            "messages": self._to_openai_messages(messages, effective_prompt),
         }
         if self._temperature is not None:
             kwargs["temperature"] = self._temperature

@@ -5,7 +5,7 @@ This module provides the core abstractions for LLM services in the Vanna Agents 
 """
 
 from .base import LLMService
-from .models import ToolParam, ToolDef, ToolCall, LLMResponse, Message
+from .models import ToolParam, ToolDef, ToolCall, LLMResponse, Message, SystemPromptPart
 
 __all__ = [
     "LLMService",
@@ -14,4 +14,5 @@ __all__ = [
     "ToolCall",
     "LLMResponse",
     "Message",
+    "SystemPromptPart",
 ]
