@@ -46,8 +46,11 @@ from mango_benchmark.fact_scorer import check_facts, derive_facts
 # label: hand-authored query executed against the real DB — not per-row audited.
 _VERIFIED_DBS = frozenset({"mango_marketplace"})
 
-# Read-only safety (DESIGN.md §2): write / server-side-JS constructs. These are
-# NOT blocked by MQLValidator (it allows $out/$merge), so this check is additive.
+# Read-only safety (DESIGN.md §2): write / server-side-JS constructs. As of the
+# read-only-guarantee fix these are blocked at run time by MQLValidator AND the
+# MongoRunner (find_forbidden_operators), so a logged, successful run_mql cannot
+# contain them. This offline check is now a redundant safety net that also covers
+# gold MQL and any non-run_mql path.
 _FORBIDDEN_STAGES = frozenset({"$out", "$merge"})
 _FORBIDDEN_OPERATORS = frozenset({"$where", "$function", "$accumulator"})
 _FORBIDDEN_OPERATIONS = frozenset({"mapreduce"})

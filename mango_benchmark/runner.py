@@ -103,6 +103,7 @@ def _build_agent(
     mongo_kwargs: dict | None = None,
     max_rows: int = 100_000,
     temperature: float | None = None,
+    max_time_ms: int = 0,
 ) -> MangoAgent:
     """Build and return a ready MangoAgent connected to *db_name*.
 
@@ -111,13 +112,19 @@ def _build_agent(
     a 100-row cap silently truncates large results and turns a correct query into
     a false FAIL on the execution-accuracy metric. The gold side is uncapped, so
     capping only the agent side is a one-sided truncation.
+
+    ``max_time_ms`` is MongoRunner's per-query server-side time budget. It
+    defaults to 0 (disabled) here — NOT to the production 30 s — so the benchmark
+    does not silently introduce a new failure mode (a slow-but-correct query
+    dying with a server timeout) that was absent when a baseline was collected.
+    Set it explicitly to measure behaviour under a time budget.
     """
     llm = build_llm(
         provider=provider, model=model, api_key=api_key, base_url=base_url,
         temperature=temperature,
     )
 
-    db = MongoRunner()
+    db = MongoRunner(max_time_ms=max_time_ms)
     db.connect(_uri_for_db(mongo_uri, db_name), **(mongo_kwargs or {}))
 
     tools = ToolRegistry()
@@ -555,6 +562,7 @@ async def run_benchmark(
     training_file: str | None = None,
     max_rows: int = 100_000,
     temperature: float | None = None,
+    max_time_ms: int = 0,
 ) -> list[dict[str, Any]]:
     """Run the full benchmark and return all result rows."""
     # --- Load dataset ---
@@ -643,6 +651,7 @@ async def run_benchmark(
                         mongo_kwargs=mongo_kwargs,
                         max_rows=max_rows,
                         temperature=temperature,
+                        max_time_ms=max_time_ms,
                     )
                     if training_file and base_agent.agent_memory is not None:
                         from mango.servers.cli.main import _load_training_file
@@ -819,6 +828,16 @@ def main() -> None:
              "result-set, which would false-FAIL large-result questions.",
     )
     parser.add_argument(
+        "--max-time-ms",
+        type=int,
+        default=0,
+        metavar="MS",
+        help="Server-side per-query time budget passed to MongoRunner (maxTimeMS). "
+             "Default 0 = disabled, so the benchmark keeps the pre-fix behaviour and "
+             "no slow-but-correct query is turned into a timeout failure. Set e.g. "
+             "30000 to mirror the production 30s budget.",
+    )
+    parser.add_argument(
         "--temperature",
         type=float,
         default=None,
@@ -946,6 +965,7 @@ def main() -> None:
             training_file=args.training_file,
             max_rows=args.max_rows,
             temperature=args.temperature,
+            max_time_ms=args.max_time_ms,
         )
     )
 

@@ -42,9 +42,13 @@ class MongoRunner(NoSQLRunner):
     and schema introspection. No write operations are possible.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, max_time_ms: int = 30_000) -> None:
         self._client: MongoClient | None = None
         self._db: Database | None = None
+        # Server-side time budget applied to every query so a pathological
+        # scan (missing index, huge $group) cannot hang the worker forever.
+        # 0 disables the limit.
+        self._max_time_ms = max_time_ms
 
     # ------------------------------------------------------------------
     # Connection
@@ -133,6 +137,11 @@ class MongoRunner(NoSQLRunner):
                 f"'{operation.collection}': {exc}"
             ) from exc
 
+    @property
+    def _time_kwargs(self) -> dict:
+        """maxTimeMS kwarg for aggregate/count, empty when disabled."""
+        return {"maxTimeMS": self._max_time_ms} if self._max_time_ms else {}
+
     def _execute_find(
         self, collection: pymongo.collection.Collection, req: QueryRequest
     ) -> pd.DataFrame:
@@ -141,18 +150,28 @@ class MongoRunner(NoSQLRunner):
             projection=req.projection,
             sort=list(req.sort.items()) if req.sort else None,
             limit=req.limit or 0,
+            max_time_ms=self._max_time_ms or None,
         )
         return self._docs_to_dataframe(list(cursor))
 
     def _execute_aggregate(
         self, collection: pymongo.collection.Collection, req: QueryRequest
     ) -> pd.DataFrame:
-        return self._docs_to_dataframe(list(collection.aggregate(req.pipeline or [])))
+        pipeline = list(req.pipeline or [])
+        # Enforce the row cap: an aggregation without a terminal $limit could
+        # otherwise stream unbounded results into memory and the LLM context.
+        # A smaller $limit already in the pipeline runs first and still wins;
+        # $limit only truncates, so appending it never changes result meaning.
+        if req.limit and req.limit > 0:
+            pipeline.append({"$limit": req.limit})
+        return self._docs_to_dataframe(
+            list(collection.aggregate(pipeline, **self._time_kwargs))
+        )
 
     def _execute_count(
         self, collection: pymongo.collection.Collection, req: QueryRequest
     ) -> pd.DataFrame:
-        count = collection.count_documents(req.filter or {})
+        count = collection.count_documents(req.filter or {}, **self._time_kwargs)
         return pd.DataFrame([{"count": count}])
 
     def _execute_distinct(
@@ -162,8 +181,21 @@ class MongoRunner(NoSQLRunner):
             raise ValidationError(
                 "distinct_field must be set for 'distinct' operations."
             )
-        values = collection.distinct(req.distinct_field, filter=req.filter or {})
-        return pd.DataFrame({req.distinct_field: values})
+        # Run distinct as a bounded aggregation instead of Collection.distinct():
+        # a native distinct on a high-cardinality field builds one unbounded
+        # array and can hit the 16 MB BSON limit. $group streams, $limit caps,
+        # and this path also carries the server-side time budget.
+        field = req.distinct_field
+        pipeline: list[dict] = []
+        if req.filter:
+            pipeline.append({"$match": req.filter})
+        pipeline.append({"$group": {"_id": f"${field}"}})
+        pipeline.append({"$sort": {"_id": 1}})
+        if req.limit and req.limit > 0:
+            pipeline.append({"$limit": req.limit})
+        docs = list(collection.aggregate(pipeline, **self._time_kwargs))
+        values = [d["_id"] for d in docs]
+        return pd.DataFrame({field: values})
 
     # ------------------------------------------------------------------
     # Schema introspection
