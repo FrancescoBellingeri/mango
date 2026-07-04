@@ -141,11 +141,26 @@ def schema_section_for_query(
     collection_names: list[str],
     total_collections: int,
 ) -> str:
-    """Build schema section for a specific subset of collections (per-query injection)."""
-    lines: list[str] = [
-        f"## Relevant schema ({len(collection_names)} of {total_collections} collections shown — "
-        "use list_collections + describe_collection to explore others)"
-    ]
+    """Build schema section for a specific subset of collections (per-query injection).
+
+    Always lists ALL collection names so the agent knows what is available,
+    then shows full field details only for the *collection_names* subset.
+    """
+    all_names = sorted(schema.keys())
+    all_names_str = ", ".join(f"`{n}`" for n in all_names)
+
+    # Show all names only when not all schemas are already fully shown, so we
+    # don't bloat the prompt for small databases that show everything anyway.
+    show_all_header = len(collection_names) < total_collections
+    lines: list[str] = []
+    if show_all_header:
+        lines.append(f"## Available collections ({total_collections} total): {all_names_str}")
+        lines.append(
+            f"\n## Relevant schema — full details for {len(collection_names)} collection(s) "
+            "(use describe_collection for the others)"
+        )
+    else:
+        lines.append(f"## Schema ({total_collections} collection(s))")
     for name in collection_names:
         info = schema.get(name)
         if info is None:

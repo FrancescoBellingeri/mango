@@ -317,32 +317,89 @@ class MangoAgent:
     # Private: core loop
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _stem(token: str) -> str:
+        """Lightweight suffix-stripping normaliser for DB schema/query matching.
+
+        Strips a small set of suffixes ordered from longest to shortest so that
+        longer patterns take priority.  Simple plural "s" is handled last and
+        only when the result would be at least 3 characters and the token does
+        not end in "ss" (to avoid "pass" → "pas").
+
+        This is intentionally not a full morphological stemmer — it only needs
+        to be good enough to bridge the gap between query vocabulary and
+        collection/field names (e.g. "restaurants" ↔ "restaurant", "cuisines"
+        ↔ "cuisine", "transactions" ↔ "transaction").
+        """
+        for suffix in ("ations", "ation", "ities", "ity"):
+            if token.endswith(suffix) and len(token) - len(suffix) >= 3:
+                return token[: -len(suffix)]
+        # Simple plural: strip trailing "s" unless the word ends in "ss".
+        if token.endswith("s") and len(token) > 3 and not token.endswith("ss"):
+            return token[:-1]
+        return token
+
     async def _select_relevant_collections(self, question: str) -> list[str]:
-        """Return names of collections most relevant to the question."""
+        """Return names of collections most relevant to the question.
+
+        Scoring (additive):
+        - +2  exact token match (query token == collection/field keyword)
+        - +2  exact stem match (stemmed token == stemmed keyword)
+        - +1  prefix match (one is a prefix of the other, min length 4)
+        - +3  bonus when the collection name itself appears as a token or stem
+              in the question (collection-name affinity)
+
+        Collections are ranked by score; top *schema_top_k* are returned.
+        Ties are broken deterministically (alphabetical order of collection name).
+        """
         if not self._schema:
             return []
         all_names = list(self._schema.keys())
         if len(all_names) <= self._schema_always_all:
             return all_names
 
-        q_tokens = set(re.sub(r"[^\w]", " ", question.lower()).split())
+        raw_tokens = set(re.sub(r"[^\w]", " ", question.lower()).split())
+        q_tokens = raw_tokens | {self._stem(t) for t in raw_tokens}
 
         scores: list[tuple[int, str]] = []
         for name in all_names:
-            keywords: set[str] = set(re.split(r"[_\s]", name.lower()))
+            # Split collection name by underscores, spaces, AND camelCase
+            # boundaries so that "listingsAndReviews" → ["listings","and","reviews"].
+            raw_name_parts = re.sub(r"([a-z])([A-Z])", r"\1 \2", name).lower()
+            raw_keywords: set[str] = set(re.split(r"[_\s]+", raw_name_parts))
             info = self._schema[name]
             for f in info.fields:
                 if "." not in f.path:
-                    keywords.update(re.split(r"[_\s]", f.name.lower()))
-            score = len(q_tokens & keywords)
+                    # Split field names the same way.
+                    raw_field_parts = re.sub(r"([a-z])([A-Z])", r"\1 \2", f.name).lower()
+                    raw_keywords.update(re.split(r"[_\s]+", raw_field_parts))
+            raw_keywords.discard("")
+            keywords = raw_keywords | {self._stem(k) for k in raw_keywords}
+
+            # Exact matches (raw and stemmed).
+            score = 2 * len(raw_tokens & raw_keywords) + len(
+                (q_tokens - raw_tokens) & (keywords - raw_keywords)
+            )
+
+            # Prefix matches.
             for qt in q_tokens:
                 for kw in keywords:
-                    if len(qt) >= 4 and (kw.startswith(qt) or qt.startswith(kw)):
+                    if len(qt) >= 4 and qt != kw and (kw.startswith(qt) or qt.startswith(kw)):
                         score += 1
                         break
+
+            # Collection-name affinity bonus: if any part of the collection
+            # name (or its stem) appears directly in the query tokens.
+            name_parts = {self._stem(p) for p in re.split(r"[_\s]+", raw_name_parts)} | set(
+                re.split(r"[_\s]+", raw_name_parts)
+            )
+            name_parts.discard("")
+            if name_parts & q_tokens:
+                score += 3
+
             scores.append((score, name))
 
-        scores.sort(key=lambda x: x[0], reverse=True)
+        scores.sort(key=lambda x: (-x[0], x[1]))
         return [name for _, name in scores[: self._schema_top_k]]
 
     async def _prepare_turn(self, question: str) -> tuple[int, str]:
@@ -381,13 +438,26 @@ class MangoAgent:
 
             entries = await self._memory.retrieve(question, top_k=self._memory_top_k)
             if entries:
-                memory_hits = len(entries)
-                lines = ["## Similar past interactions\n"]
-                for e in entries:
-                    lines.append(f"Q: {e.question}")
-                    lines.append(f"Tool: {e.tool_name} | Args: {e.tool_args}")
-                    lines.append(f"Result: {e.result_summary}\n")
-                sections.append("\n".join(lines))
+                known_collections: set[str] = set(self._schema.keys()) if self._schema else set()
+                # Silently drop entries that reference a collection no longer
+                # present in the schema — they would mislead the agent.
+                if known_collections:
+                    entries = [
+                        e for e in entries
+                        if not (
+                            isinstance(e.tool_args, dict)
+                            and e.tool_args.get("collection")
+                            and e.tool_args["collection"] not in known_collections
+                        )
+                    ]
+                if entries:
+                    memory_hits = len(entries)
+                    lines = ["## Similar past interactions\n"]
+                    for e in entries:
+                        lines.append(f"Q: {e.question}")
+                        lines.append(f"Tool: {e.tool_name} | Args: {e.tool_args}")
+                        lines.append(f"Result: {e.result_summary}\n")
+                    sections.append("\n".join(lines))
 
             if sections:
                 memory_context = "\n\n".join(sections) + "\n\n"
