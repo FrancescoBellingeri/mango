@@ -21,6 +21,7 @@ import difflib
 from dataclasses import dataclass, field
 from typing import Any
 
+from mango.core.security import find_forbidden_operators
 from mango.core.types import QueryRequest
 from mango.nosql_runner import NoSQLRunner
 
@@ -168,6 +169,7 @@ class MQLValidator:
         warnings: list[str] = []
 
         self._check_operation(request, errors)
+        self._check_forbidden_operators(request, errors)
         self._check_collection(request, errors)
         self._check_required_args(request, errors)
         self._check_pipeline_stages(request, errors)
@@ -188,6 +190,25 @@ class MQLValidator:
             errors.append(
                 f"Operation '{request.operation}' is not allowed. "
                 f"Allowed operations: {sorted(_ALLOWED_OPERATIONS)}."
+            )
+
+    def _check_forbidden_operators(
+        self, request: QueryRequest, errors: list[str]
+    ) -> None:
+        """Block write / server-side-JS / streaming operators at any depth.
+
+        The operation-level allowlist (find/aggregate/count/distinct) does not
+        inspect pipeline stages, so a stage like $out or an operator like
+        $where would otherwise slip through. This closes that gap.
+        """
+        forbidden = find_forbidden_operators(request.filter, request.pipeline)
+        if forbidden:
+            errors.append(
+                "Forbidden operator(s) "
+                f"{forbidden} are not permitted — Mango is read-only and does "
+                "not allow writes ($out/$merge), server-side JavaScript "
+                "($where/$function/$accumulator), change streams, or "
+                "administrative stages."
             )
 
     def _check_collection(self, request: QueryRequest, errors: list[str]) -> None:

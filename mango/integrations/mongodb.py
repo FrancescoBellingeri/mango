@@ -16,6 +16,7 @@ from pymongo import MongoClient
 from pymongo.database import Database
 
 from mango.nosql_runner import NoSQLRunner
+from mango.core.security import find_forbidden_operators
 from mango.core.types import (
     BackendError,
     FieldInfo,
@@ -102,6 +103,17 @@ class MongoRunner(NoSQLRunner):
             raise ValidationError(
                 f"Operation '{operation.operation}' is not allowed. "
                 f"Allowed: {sorted(_ALLOWED_OPERATIONS)}"
+            )
+
+        # Defence-in-depth: block write / server-side-JS / streaming operators
+        # regardless of whether pre-execution validation ran. The read-only
+        # guarantee must not be optional.
+        forbidden = find_forbidden_operators(operation.filter, operation.pipeline)
+        if forbidden:
+            raise ValidationError(
+                f"Forbidden operator(s) {forbidden} are not permitted "
+                "(read-only: no $out/$merge, no server-side JavaScript, "
+                "no change streams or administrative stages)."
             )
 
         collection = self._database[operation.collection]
