@@ -21,6 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from mango.agent.agent import MangoAgent
 from mango.servers.fastapi.routes import router
+from mango.servers.fastapi.sessions import SessionManager
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -73,6 +74,9 @@ class MangoFastAPIServer:
         )
 
         app.include_router(router, prefix="/api/v1")
+        # Root agent kept for memory endpoints; per-client conversations are
+        # isolated through the session manager (never share app.state.agent).
         app.state.agent = self._agent
+        app.state.sessions = SessionManager(self._agent)
 
         return app

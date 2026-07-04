@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import AsyncGenerator
 from uuid import uuid4
 
@@ -18,6 +19,8 @@ from mango.servers.fastapi.models import (
     TrainRequest,
     TrainResponse,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -49,18 +52,41 @@ async def ask_stream(request: Request, body: AskRequest) -> StreamingResponse:
     - ``answer``      — ``{text}`` the final natural language answer.
     - ``done``        — ``{iterations, input_tokens, output_tokens,
                           memory_hits, tool_calls_made}`` end-of-stream metadata.
-    - ``error``       — ``{message}`` if an unhandled exception occurs.
+    - ``error``       — ``{message, request_id}`` if an unhandled exception
+                        occurs. ``message`` is generic; the full detail is
+                        logged server-side under ``request_id``.
     """
-    agent = request.app.state.agent
-    session_id = body.session_id or str(uuid4())
+    session_id, session = request.app.state.sessions.get_or_create(body.session_id)
 
     async def _generate() -> AsyncGenerator[str, None]:
         yield f"data: {json.dumps({'type': 'session', 'session_id': session_id})}\n\n"
-        try:
-            async for event in agent.ask_stream(body.question):
-                yield f"data: {json.dumps(event)}\n\n"
-        except Exception as exc:
-            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+        # Hold the per-session lock for the whole stream so concurrent requests
+        # on this session are serialised, not interleaved on one conversation.
+        async with session.lock:
+            try:
+                async for event in session.agent.ask_stream(body.question):
+                    yield f"data: {json.dumps(event)}\n\n"
+            except Exception:
+                # Never leak internal error detail (DB host, paths, creds) to
+                # the client. Log the full exception server-side, correlated by
+                # a request_id the client can quote when reporting the failure.
+                request_id = uuid4().hex[:8]
+                logger.exception(
+                    "ask_stream failed (session=%s, request_id=%s)",
+                    session_id,
+                    request_id,
+                )
+                yield (
+                    "data: "
+                    + json.dumps(
+                        {
+                            "type": "error",
+                            "message": "internal error",
+                            "request_id": request_id,
+                        }
+                    )
+                    + "\n\n"
+                )
 
     return StreamingResponse(
         _generate(),
