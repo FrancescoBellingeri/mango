@@ -139,7 +139,18 @@ class MongoRunner(NoSQLRunner):
                 return self._execute_count(collection, operation)
             else:  # distinct
                 return self._execute_distinct(collection, operation)
+        except pymongo.errors.ConnectionFailure as exc:
+            # Infra failure (server unreachable, connection lost, server-selection
+            # timeout, auto-reconnect). The LLM cannot fix this by rewriting the
+            # query — surface as fatal so the agent stops retrying. Caught before
+            # PyMongoError because ConnectionFailure is a subclass of it.
+            raise BackendError(
+                f"MongoDB connection error on {operation.operation} "
+                f"'{operation.collection}': {exc}"
+            ) from exc
         except pymongo.errors.PyMongoError as exc:
+            # Query-level error (bad operator, execution timeout on a heavy
+            # query, etc.). The LLM can retry with a corrected or simpler query.
             raise QueryError(
                 f"MongoDB error on {operation.operation} "
                 f"'{operation.collection}': {exc}"

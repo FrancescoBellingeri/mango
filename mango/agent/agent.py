@@ -37,23 +37,28 @@ _MEMORY_TOOL_NAMES: frozenset[str] = frozenset({
     "save_text_memory",
 })
 
-# Error substrings that indicate infrastructure failures — not retryable.
-_NON_RETRYABLE_PATTERNS: tuple[str, ...] = (
-    "connection refused",
-    "authentication failed",
-    "not connected",
-    "timed out",
-    "network",
-    "cannot connect",
-    "ssl",
-    "certificate",
-)
+# Exception *kinds* (ToolResult.error_kind = exception class name) that indicate
+# infrastructure failures the LLM cannot fix by rewriting its query. Everything
+# else — validation errors, query errors, execution timeouts, bad tool args,
+# returned failures with no kind — is treated as retryable so the LLM gets a
+# chance to correct itself.
+_FATAL_ERROR_KINDS: frozenset[str] = frozenset({
+    "BackendError",
+    "LLMError",
+    "ConnectionFailure",
+    "ServerSelectionTimeoutError",
+    "AutoReconnect",
+})
 
 
-def _is_retryable(error: str) -> bool:
-    """Return True when the error is a query/logic error the LLM can fix."""
-    low = error.lower()
-    return not any(pat in low for pat in _NON_RETRYABLE_PATTERNS)
+def _is_retryable(error_kind: str | None) -> bool:
+    """Return True when the error is a query/logic error the LLM can fix.
+
+    Classifies by exception *type*, not by substring-matching the message: a
+    collection named 'network_events' or a query that 'timed out' must not be
+    misread as an infrastructure failure and blocked from a corrective retry.
+    """
+    return error_kind not in _FATAL_ERROR_KINDS
 
 
 def _retry_message(tool_name: str, tool_args: dict, error: str, attempt: int, max_retries: int) -> str:
@@ -587,7 +592,8 @@ class MangoAgent:
                     retry_count = 0
                 else:
                     error_msg = result.error or result_text
-                    if _is_retryable(error_msg) and retry_count < self._max_retries:
+                    retryable = _is_retryable(result.error_kind)
+                    if retryable and retry_count < self._max_retries:
                         retry_count += 1
                         logger.info(
                             "Retryable error on '%s' (attempt %d/%d): %s",
@@ -596,7 +602,7 @@ class MangoAgent:
                         result_text = _retry_message(
                             tc.tool_name, tc.tool_args, error_msg, retry_count, self._max_retries
                         )
-                    elif not _is_retryable(error_msg):
+                    elif not retryable:
                         logger.warning("Non-retryable error on '%s': %s", tc.tool_name, error_msg[:120])
                         result_text = _fatal_message(tc.tool_name, error_msg)
                     else:

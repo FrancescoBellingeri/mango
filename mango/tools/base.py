@@ -36,6 +36,7 @@ class ToolResult:
     success: bool
     data: Any = None
     error: str | None = None
+    error_kind: str | None = None
 
     def as_text(self) -> str:
         """Render the result as a string to feed back into the LLM."""
@@ -130,7 +131,12 @@ class ToolRegistry:
         try:
             return await tool.execute(**kwargs)
         except Exception as exc:
-            return ToolResult(success=False, error=str(exc))
+            # Carry the exception *type* so the agent can classify retryable
+            # (validation/query) vs fatal (backend/infra) errors by kind rather
+            # than by fragile substring-matching the message text.
+            return ToolResult(
+                success=False, error=str(exc), error_kind=type(exc).__name__
+            )
 
     def __contains__(self, name: str) -> bool:
         return name in self._tools

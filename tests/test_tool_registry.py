@@ -128,6 +128,9 @@ class TestToolRegistry:
         result = await registry.execute("fail")
         assert result.success is False
         assert "intentional failure" in result.error
+        # The exception type is stamped so the agent can classify retryability
+        # by kind instead of substring-matching the message.
+        assert result.error_kind == "RuntimeError"
 
     def test_empty_registry(self):
         registry = ToolRegistry()

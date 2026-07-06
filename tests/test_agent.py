@@ -364,13 +364,53 @@ class TestErrorRecovery:
             LLMResponse(text="Cannot connect.", tool_calls=[]),
         ]
         agent, _ = _agent(MockLLM, mongo_backend, tool_registry, responses)
-        fatal_result = ToolResult(success=False, error="Connection refused: cannot connect to MongoDB")
+        # Fatal is classified by exception *kind* (error_kind), not by message
+        # substring — the registry stamps type(exc).__name__ on the ToolResult.
+        fatal_result = ToolResult(
+            success=False,
+            error="Connection refused: cannot connect to MongoDB",
+            error_kind="BackendError",
+        )
         with patch.object(agent._registry, "execute", new=AsyncMock(return_value=fatal_result)):
             resp = await agent.ask("?")
 
         tool_msgs = [m for m in agent._conversation if m.role == "tool"]
         assert any("[FATAL]" in str(m.content) for m in tool_msgs)
         assert resp.retries_made == 0
+
+    async def test_substring_looking_error_still_retryable_by_kind(
+        self, MockLLM, mongo_backend, tool_registry
+    ):
+        """A message containing 'network'/'timed out' must NOT be misread as fatal.
+
+        Regression for the old substring classifier: a collection named
+        'network_events' or a query that 'timed out' is retryable — the LLM can
+        act on the 'did you mean' suggestion or simplify the query.
+        """
+        from unittest.mock import AsyncMock, patch
+        from mango.tools.base import ToolResult
+
+        responses = [
+            LLMResponse(
+                text=None,
+                tool_calls=[ToolCall("run_mql", {"operation": "find", "collection": "network_events"}, "tc-1")],
+            ),
+            LLMResponse(text="Recovered.", tool_calls=[]),
+        ]
+        agent, _ = _agent(MockLLM, mongo_backend, tool_registry, responses)
+        agent._max_retries = 2
+        retryable_result = ToolResult(
+            success=False,
+            error="Collection 'network_events' does not exist. Did you mean 'events'? Query timed out.",
+            error_kind="ValidationError",
+        )
+        with patch.object(agent._registry, "execute", new=AsyncMock(return_value=retryable_result)):
+            resp = await agent.ask("?")
+
+        tool_msgs = [m for m in agent._conversation if m.role == "tool"]
+        assert any("[RETRY" in str(m.content) for m in tool_msgs)
+        assert not any("[FATAL]" in str(m.content) for m in tool_msgs)
+        assert resp.retries_made == 1
 
     async def test_retry_count_resets_after_success(
         self, MockLLM, mongo_backend, tool_registry
