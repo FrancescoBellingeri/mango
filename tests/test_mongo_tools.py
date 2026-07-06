@@ -92,6 +92,28 @@ class TestDescribeCollectionTool:
         tool = DescribeCollectionTool(mongo_backend)
         assert tool.definition.name == "describe_collection"
 
+    async def test_nonexistent_collection_errors(self, mongo_backend):
+        # A wrong name must be a clear error, not success with an empty schema
+        # (which the agent would misread as "the collection is empty").
+        tool = DescribeCollectionTool(mongo_backend)
+        result = await tool.execute(collection="ghost_collection")
+        assert result.success is False
+        assert "does not exist" in (result.error or "")
+
+    async def test_nonexistent_suggests_similar_name(self, mongo_backend):
+        # "user" is a near-miss for the real "users" collection.
+        tool = DescribeCollectionTool(mongo_backend)
+        result = await tool.execute(collection="user")
+        assert result.success is False
+        assert "users" in (result.error or "")
+
+    async def test_existing_collection_still_succeeds(self, mongo_backend):
+        # Control: the existence check must not break the happy path.
+        tool = DescribeCollectionTool(mongo_backend)
+        result = await tool.execute(collection="users")
+        assert result.success is True
+        assert result.data["collection"] == "users"
+
 
 # ---------------------------------------------------------------------------
 # RunMQLTool

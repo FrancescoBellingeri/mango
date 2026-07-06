@@ -14,6 +14,7 @@ Tools defined here:
 
 from __future__ import annotations
 
+import difflib
 import fnmatch
 import json
 import re
@@ -142,6 +143,18 @@ class DescribeCollectionTool(Tool):
     async def execute(self, **kwargs: Any) -> ToolResult:
         collection: str = kwargs["collection"]
         all_collections = set(self._backend.list_collections())
+
+        # A wrong collection name must fail loudly with suggestions, not return
+        # an empty schema the agent would misread as "the collection is empty".
+        if collection not in all_collections:
+            msg = f"Collection '{collection}' does not exist."
+            suggestions = difflib.get_close_matches(
+                collection, sorted(all_collections), n=3, cutoff=0.6
+            )
+            if suggestions:
+                msg += f" Did you mean: {suggestions}?"
+            return ToolResult(success=False, error=msg)
+
         schema = self._backend._introspect_collection(collection, all_collections)
 
         # Serialise FieldInfo list into plain dicts for the LLM.
