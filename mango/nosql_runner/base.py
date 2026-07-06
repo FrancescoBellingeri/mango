@@ -8,8 +8,7 @@ all database interaction goes through this ABC.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-
-import pandas as pd
+from typing import Any
 
 from mango.core.types import QueryRequest, SchemaInfo
 
@@ -35,16 +34,21 @@ class NoSQLRunner(ABC):
         """
 
     @abstractmethod
-    def execute_query(self, operation: QueryRequest) -> pd.DataFrame:
-        """Execute a read-only query and return results as a DataFrame.
+    def execute_query(self, operation: QueryRequest) -> list[dict[str, Any]]:
+        """Execute a read-only query and return results as a list of rows.
+
+        Rows are plain, JSON-safe dicts (BSON types stringified, dates as ISO
+        strings). Unlike a DataFrame, a document missing a field simply omits
+        that key (no null injection) and integer values are not widened to
+        float — both matter for the LLM and for result-set equivalence scoring.
 
         Args:
             operation: Standardized query request. Only find, aggregate,
                 count, and distinct operations are allowed.
 
         Returns:
-            A pandas DataFrame with the query results. For scalar results
-            (count), a single-row DataFrame with a 'result' column is returned.
+            List of row dicts. ``count`` returns ``[{"count": N}]``; ``distinct``
+            returns one row per value ``[{<field>: value}, ...]``.
 
         Raises:
             QueryError: If the query fails to execute.

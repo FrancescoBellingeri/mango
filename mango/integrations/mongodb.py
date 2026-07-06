@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
+from datetime import datetime
 from typing import Any
 
 import pandas as pd
@@ -93,15 +94,18 @@ class MongoRunner(NoSQLRunner):
     # Query execution
     # ------------------------------------------------------------------
 
-    def execute_query(self, operation: QueryRequest) -> pd.DataFrame:
-        """Execute a read-only query and return results as a DataFrame.
+    def execute_query(self, operation: QueryRequest) -> list[dict[str, Any]]:
+        """Execute a read-only query and return results as a list of rows.
+
+        Rows are JSON-safe dicts (BSON types stringified, dates as ISO strings),
+        built directly from the documents — no pandas roundtrip, so absent fields
+        stay absent (not null) and ints stay ints (not widened to float).
 
         Args:
             operation: Standardized query request.
 
         Returns:
-            DataFrame with query results. Count returns a single-row
-            DataFrame with a 'count' column.
+            List of row dicts. Count returns ``[{"count": N}]``.
 
         Raises:
             ValidationError: If the operation type is not allowed.
@@ -148,7 +152,7 @@ class MongoRunner(NoSQLRunner):
 
     def _execute_find(
         self, collection: pymongo.collection.Collection, req: QueryRequest
-    ) -> pd.DataFrame:
+    ) -> list[dict[str, Any]]:
         cursor = collection.find(
             filter=req.filter or {},
             projection=req.projection,
@@ -156,7 +160,7 @@ class MongoRunner(NoSQLRunner):
             limit=req.limit or 0,
             max_time_ms=self._max_time_ms or None,
         )
-        return self._docs_to_dataframe(list(cursor))
+        return self._docs_to_rows(list(cursor))
 
     def _execute_aggregate(
         self, collection: pymongo.collection.Collection, req: QueryRequest
@@ -168,19 +172,19 @@ class MongoRunner(NoSQLRunner):
         # $limit only truncates, so appending it never changes result meaning.
         if req.limit and req.limit > 0:
             pipeline.append({"$limit": req.limit})
-        return self._docs_to_dataframe(
+        return self._docs_to_rows(
             list(collection.aggregate(pipeline, **self._time_kwargs))
         )
 
     def _execute_count(
         self, collection: pymongo.collection.Collection, req: QueryRequest
-    ) -> pd.DataFrame:
+    ) -> list[dict[str, Any]]:
         count = collection.count_documents(req.filter or {}, **self._time_kwargs)
-        return pd.DataFrame([{"count": count}])
+        return [{"count": count}]
 
     def _execute_distinct(
         self, collection: pymongo.collection.Collection, req: QueryRequest
-    ) -> pd.DataFrame:
+    ) -> list[dict[str, Any]]:
         if not req.distinct_field:
             raise ValidationError(
                 "distinct_field must be set for 'distinct' operations."
@@ -198,8 +202,7 @@ class MongoRunner(NoSQLRunner):
         if req.limit and req.limit > 0:
             pipeline.append({"$limit": req.limit})
         docs = list(collection.aggregate(pipeline, **self._time_kwargs))
-        values = [d["_id"] for d in docs]
-        return pd.DataFrame({field: values})
+        return [{field: self._json_safe(d["_id"])} for d in docs]
 
     # ------------------------------------------------------------------
     # Schema introspection
@@ -430,6 +433,29 @@ class MongoRunner(NoSQLRunner):
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _docs_to_rows(docs: list[dict]) -> list[dict[str, Any]]:
+        """Convert raw BSON documents to JSON-safe row dicts.
+
+        Per-document conversion: an absent field stays absent (no null injection)
+        and ints keep their type — unlike the old DataFrame roundtrip.
+        """
+        return [MongoRunner._json_safe(doc) for doc in docs]
+
+    @staticmethod
+    def _json_safe(obj: Any) -> Any:
+        """Recursively convert BSON/datetime values to JSON-serialisable form."""
+        if isinstance(obj, dict):
+            return {k: MongoRunner._json_safe(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [MongoRunner._json_safe(v) for v in obj]
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        type_name = type(obj).__name__
+        if type_name in {"ObjectId", "Decimal128", "Binary", "Code", "Regex"}:
+            return str(obj)
+        return obj
 
     @staticmethod
     def _docs_to_dataframe(docs: list[dict]) -> pd.DataFrame:

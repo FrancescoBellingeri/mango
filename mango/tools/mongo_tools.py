@@ -417,16 +417,9 @@ class RunMQLTool(Tool):
                 return ToolResult(success=False, error=validation.as_tool_error())
             warnings = validation.warnings
 
-        df = self._backend.execute_query(request)
+        rows = self._backend.execute_query(request)
 
-        if df.empty:
-            data: dict = {"rows": [], "row_count": 0}
-            if warnings:
-                data["validation_warnings"] = warnings
-            return ToolResult(success=True, data=data)
-
-        rows = json.loads(df.to_json(orient="records", date_format="iso", default_handler=str))
-        data = {"rows": rows, "row_count": len(rows)}
+        data: dict = {"rows": rows, "row_count": len(rows)}
         if warnings:
             data["validation_warnings"] = warnings
         return ToolResult(success=True, data=data)

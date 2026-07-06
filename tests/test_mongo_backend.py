@@ -188,14 +188,14 @@ class TestMongoBackendExecuteQuery:
             collection="users",
             filter={"name": "Alice"},
         )
-        df = mongo_backend.execute_query(req)
-        assert len(df) == 1
-        assert df.iloc[0]["name"] == "Alice"
+        rows = mongo_backend.execute_query(req)
+        assert len(rows) == 1
+        assert rows[0]["name"] == "Alice"
 
     def test_count_all(self, mongo_backend):
         req = QueryRequest(operation="count", collection="users")
-        df = mongo_backend.execute_query(req)
-        assert df.iloc[0]["count"] == 3
+        rows = mongo_backend.execute_query(req)
+        assert rows[0]["count"] == 3
 
     def test_count_with_filter(self, mongo_backend):
         req = QueryRequest(
@@ -203,14 +203,14 @@ class TestMongoBackendExecuteQuery:
             collection="users",
             filter={"age": {"$gt": 26}},
         )
-        df = mongo_backend.execute_query(req)
-        assert df.iloc[0]["count"] == 2  # Alice (30) and Charlie (35)
+        rows = mongo_backend.execute_query(req)
+        assert rows[0]["count"] == 2  # Alice (30) and Charlie (35)
 
     def test_aggregate_group(self, mongo_backend):
         pipeline = [{"$group": {"_id": "$product", "total": {"$sum": "$qty"}}}]
         req = QueryRequest(operation="aggregate", collection="orders", pipeline=pipeline)
-        df = mongo_backend.execute_query(req)
-        assert len(df) == 2  # Widget and Gadget
+        rows = mongo_backend.execute_query(req)
+        assert len(rows) == 2  # Widget and Gadget
 
     def test_distinct(self, mongo_backend):
         req = QueryRequest(
@@ -218,8 +218,8 @@ class TestMongoBackendExecuteQuery:
             collection="orders",
             distinct_field="product",
         )
-        df = mongo_backend.execute_query(req)
-        assert set(df["product"]) == {"Widget", "Gadget"}
+        rows = mongo_backend.execute_query(req)
+        assert {r["product"] for r in rows} == {"Widget", "Gadget"}
 
     def test_invalid_operation_raises_validation_error(self, mongo_backend):
         req = QueryRequest(operation="delete", collection="users")
