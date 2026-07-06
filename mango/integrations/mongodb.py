@@ -49,6 +49,10 @@ class MongoRunner(NoSQLRunner):
         # scan (missing index, huge $group) cannot hang the worker forever.
         # 0 disables the limit.
         self._max_time_ms = max_time_ms
+        # Cache of collection → {dotted_path: set(bson_type_names)}, used for
+        # schema-aware literal coercion. Populated lazily, kept for the runner's
+        # lifetime (schema is stable within a session).
+        self._field_type_cache: dict[str, dict[str, set[str]]] = {}
 
     # ------------------------------------------------------------------
     # Connection
@@ -282,6 +286,36 @@ class MongoRunner(NoSQLRunner):
         if not docs and collection not in self._database.list_collection_names():
             raise BackendError(f"Collection '{collection}' does not exist.")
         return docs
+
+    def field_types(self, collection: str, sample_size: int = 50) -> dict[str, set[str]]:
+        """Return {dotted_path: set(bson_type_names)} for a collection.
+
+        Cheap, cached, best-effort: samples up to *sample_size* documents and
+        reuses the schema inference. Powers schema-aware literal coercion so a
+        query string is only converted to a datetime/ObjectId when the target
+        field is actually stored that way. Returns an empty map on any failure
+        (coercion then safely leaves values untouched).
+        """
+        cached = self._field_type_cache.get(collection)
+        if cached is not None:
+            return cached
+
+        try:
+            docs = list(self._database[collection].find().limit(sample_size))
+        except Exception:
+            docs = []
+
+        out: dict[str, set[str]] = {}
+
+        def _walk(fields: list[FieldInfo]) -> None:
+            for f in fields:
+                out[f.path] = set(f.types)
+                if f.sub_fields:
+                    _walk(f.sub_fields)
+
+        _walk(self._infer_fields(docs))
+        self._field_type_cache[collection] = out
+        return out
 
     def list_collections(self) -> list[str]:
         """Return sorted list of all collection names.

@@ -18,16 +18,8 @@ import fnmatch
 import json
 import re
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
-
-# Regex that matches ISO 8601 date strings with optional time/ms/tz parts.
-_ISO_DATE_RE = re.compile(
-    r"^\d{4}-\d{2}-\d{2}"           # date
-    r"(?:[T ]\d{2}:\d{2}:\d{2}"     # optional time
-    r"(?:\.\d+)?"                    # optional fractional seconds
-    r"(?:Z|[+-]\d{2}:?\d{2})?)?$"   # optional timezone
-)
 
 # Regex that detects UUID segments inside collection names.
 _UUID_RE = re.compile(
@@ -391,11 +383,14 @@ class RunMQLTool(Tool):
         # Build QueryRequest from kwargs, applying row cap.
         limit = min(int(kwargs.get("limit") or self._max_rows), self._max_rows)
 
+        ftypes = _safe_field_types(self._backend, kwargs.get("collection"))
         request = QueryRequest(
             operation=kwargs["operation"],
             collection=kwargs["collection"],
-            filter=_coerce_dates(kwargs.get("filter")),
-            pipeline=_coerce_dates(_parse_json_arg(kwargs.get("pipeline"))),
+            filter=_coerce_filter(kwargs.get("filter"), ftypes),
+            pipeline=_coerce_pipeline_matches(
+                _parse_json_arg(kwargs.get("pipeline")), ftypes
+            ),
             projection=kwargs.get("projection"),
             sort=kwargs.get("sort"),
             limit=limit,
@@ -501,11 +496,14 @@ class ExplainQueryTool(Tool):
         )
 
     async def execute(self, **kwargs: Any) -> ToolResult:
+        ftypes = _safe_field_types(self._backend, kwargs.get("collection"))
         request = QueryRequest(
             operation=kwargs["operation"],
             collection=kwargs["collection"],
-            filter=_coerce_dates(kwargs.get("filter")),
-            pipeline=_coerce_dates(_parse_json_arg(kwargs.get("pipeline"))),
+            filter=_coerce_filter(kwargs.get("filter"), ftypes),
+            pipeline=_coerce_pipeline_matches(
+                _parse_json_arg(kwargs.get("pipeline")), ftypes
+            ),
             projection=kwargs.get("projection"),
             sort=kwargs.get("sort"),
             distinct_field=kwargs.get("distinct_field"),
@@ -552,33 +550,6 @@ def _parse_json_arg(value: Any) -> Any:
     return value
 
 
-def _coerce_dates(obj: Any) -> Any:
-    """Recursively convert ISO date strings and {$date: ...} objects to datetime.
-
-    The LLM often generates date filters as plain strings ("2024-01-01T00:00:00")
-    or Extended JSON ({$date: "..."}). MongoDB requires actual datetime objects
-    when the field is stored as BSON date type. This function normalises both forms.
-    """
-    if obj is None:
-        return None
-
-    if isinstance(obj, list):
-        return [_coerce_dates(item) for item in obj]
-
-    if isinstance(obj, dict):
-        # Extended JSON form: {"$date": "2024-01-01T00:00:00.000Z"}
-        if list(obj.keys()) == ["$date"]:
-            return _parse_iso(obj["$date"])
-        return {k: _coerce_dates(v) for k, v in obj.items()}
-
-    if isinstance(obj, str) and _ISO_DATE_RE.match(obj):
-        parsed = _parse_iso(obj)
-        # Only substitute if we successfully parsed a datetime.
-        return parsed if parsed is not None else obj
-
-    return obj
-
-
 def _parse_iso(value: Any) -> datetime | None:
     """Parse an ISO 8601 string to datetime, returning None on failure."""
     if not isinstance(value, str):
@@ -598,11 +569,154 @@ def _parse_iso(value: Any) -> datetime | None:
     for fmt in formats:
         try:
             dt = datetime.strptime(s, fmt)
-            # Strip timezone info — pymongo handles naive datetimes as UTC.
+            # pymongo stores naive datetimes as UTC. When the string carried an
+            # offset, convert to UTC *first* (do not just drop tzinfo, which
+            # would silently shift the instant by the offset), then go naive.
+            if dt.tzinfo is not None:
+                dt = dt.astimezone(timezone.utc)
             return dt.replace(tzinfo=None)
         except ValueError:
             continue
     return None
+
+
+# ---------------------------------------------------------------------------
+# Schema-aware literal coercion
+# ---------------------------------------------------------------------------
+#
+# The LLM emits query literals as JSON strings. Whether "2020-01-01" or a
+# 24-char hex must become a BSON datetime / ObjectId depends on how the target
+# field is actually stored. We resolve the field's declared type from the
+# introspected schema and coerce ONLY when that type is unambiguous — so a
+# genuinely string-typed field is never broken, and an _id / ObjectId field
+# written as hex actually matches.
+
+_OBJECTID_HEX_RE = re.compile(r"^[0-9a-fA-F]{24}$")
+
+# Filter keys that combine sub-clauses; their operands are themselves filters
+# and must be recursed with the field context reset.
+_LOGICAL_OPERATORS = frozenset({"$and", "$or", "$nor"})
+
+
+def _target_type(types: set[str]) -> str | None:
+    """Return 'date' / 'ObjectId' when the field is unambiguously that type.
+
+    'null' is ignored (optional fields). Mixed types (e.g. date+string) return
+    None: coercing would break one of the encodings, so we leave the value as-is.
+    """
+    non_null = {t for t in types if t != "null"}
+    if non_null == {"date"}:
+        return "date"
+    if non_null == {"ObjectId"}:
+        return "ObjectId"
+    return None
+
+
+def _coerce_scalar(value: Any, target: str) -> Any:
+    """Coerce a single literal to *target* type, or return it unchanged."""
+    if target == "date":
+        if isinstance(value, dict) and list(value.keys()) == ["$date"]:
+            parsed = _parse_iso(value["$date"])
+            return parsed if parsed is not None else value
+        if isinstance(value, str):
+            parsed = _parse_iso(value)
+            return parsed if parsed is not None else value
+        return value
+    if target == "ObjectId":
+        # Extended JSON form: {"$oid": "<hex>"} — the standard representation an
+        # LLM emits for an ObjectId, analogous to {"$date": ...}.
+        if isinstance(value, dict) and list(value.keys()) == ["$oid"]:
+            value = value["$oid"]
+        if isinstance(value, str) and _OBJECTID_HEX_RE.match(value):
+            try:
+                from bson import ObjectId
+                return ObjectId(value)
+            except Exception:
+                return value
+        return value
+    return value
+
+
+# Single-key Extended JSON wrappers routed to _coerce_scalar rather than being
+# treated as operator dicts.
+_EXTENDED_JSON_KEYS = frozenset({"$date", "$oid"})
+
+
+def _coerce_operand(value: Any, target: str) -> Any:
+    """Coerce the operand of a field: scalar, list ($in/$nin), or operator dict."""
+    if isinstance(value, dict):
+        # Extended JSON forms ({"$date": ...}, {"$oid": ...}) are whole values,
+        # not operator dicts.
+        if len(value) == 1 and next(iter(value)) in _EXTENDED_JSON_KEYS:
+            return _coerce_scalar(value, target)
+        # Operator dict, e.g. {"$gte": ..., "$lte": ...} or {"$not": {...}}.
+        return {
+            k: (_coerce_operand(v, target) if isinstance(k, str) and k.startswith("$") else v)
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [_coerce_operand(v, target) for v in value]
+    return _coerce_scalar(value, target)
+
+
+def _coerce_filter(filter_doc: Any, field_types: dict[str, set[str]]) -> Any:
+    """Return *filter_doc* with literals coerced according to field types.
+
+    Only field keys present in *field_types* with an unambiguous date/ObjectId
+    type are touched. Logical operators are recursed; $expr and unknown fields
+    are left untouched.
+    """
+    if not isinstance(filter_doc, dict):
+        return filter_doc
+
+    out: dict = {}
+    for key, value in filter_doc.items():
+        if key in _LOGICAL_OPERATORS and isinstance(value, list):
+            out[key] = [_coerce_filter(sub, field_types) for sub in value]
+        elif isinstance(key, str) and key.startswith("$"):
+            # $expr, $text, $comment, etc. — leave the body untouched.
+            out[key] = value
+        else:
+            target = _target_type(field_types.get(key, set()))
+            out[key] = _coerce_operand(value, target) if target else value
+    return out
+
+
+def _safe_field_types(backend: Any, collection: Any) -> dict[str, set[str]]:
+    """Best-effort field-type map; empty (no coercion) on any problem."""
+    if not collection:
+        return {}
+    getter = getattr(backend, "field_types", None)
+    if getter is None:
+        return {}
+    try:
+        return getter(collection)
+    except Exception:
+        return {}
+
+
+def _coerce_pipeline_matches(
+    pipeline: Any, field_types: dict[str, set[str]]
+) -> Any:
+    """Coerce literals inside $match stages using base-collection field types.
+
+    Only $match stages are touched. Computed fields produced downstream (after
+    $group/$project) are not in *field_types*, so they are left untouched.
+    """
+    if not isinstance(pipeline, list):
+        return pipeline
+    out: list = []
+    for stage in pipeline:
+        if (
+            isinstance(stage, dict)
+            and len(stage) == 1
+            and "$match" in stage
+            and isinstance(stage["$match"], dict)
+        ):
+            out.append({"$match": _coerce_filter(stage["$match"], field_types)})
+        else:
+            out.append(stage)
+    return out
 
 
 # ---------------------------------------------------------------------------
