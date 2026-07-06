@@ -45,7 +45,9 @@ class ToolResult:
             return self.data
         import json
         try:
-            return json.dumps(self.data, default=str, ensure_ascii=False, indent=2)
+            return json.dumps(
+                self.data, default=str, ensure_ascii=False, separators=(",", ":")
+            )
         except (TypeError, ValueError):
             return str(self.data)
 
