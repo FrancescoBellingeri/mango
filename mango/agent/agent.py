@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import AsyncGenerator, Callable
@@ -59,6 +60,15 @@ def _is_retryable(error_kind: str | None) -> bool:
     misread as an infrastructure failure and blocked from a corrective retry.
     """
     return error_kind not in _FATAL_ERROR_KINDS
+
+
+# Historical tool-result compaction (§9): tool results from completed turns are
+# rewritten to row_count + a few sample rows so a large payload is not re-sent
+# verbatim on every subsequent LLM call.
+_COMPACT_TOOL_RESULT_THRESHOLD = 600  # only compact tool results longer than this
+_COMPACT_SAMPLE_ROWS = 3              # rows kept from a run_mql result
+_COMPACT_HEAD_CHARS = 400             # chars kept by the generic (non-row) fallback
+_COMPACT_MARKER = "_compacted"        # sentinel marking an already-compacted result
 
 
 def _retry_message(tool_name: str, tool_args: dict, error: str, attempt: int, max_retries: int) -> str:
@@ -416,6 +426,10 @@ class MangoAgent:
         if not self._ready:
             self.setup()
 
+        # Every existing tool result now belongs to a completed turn — shrink the
+        # bulky ones before they are re-sent on this turn's LLM calls.
+        self._compact_historical_tool_results()
+
         self._conversation.append(Message(role="user", content=question))
 
         memory_hits = 0
@@ -643,6 +657,69 @@ class MangoAgent:
             "tool_calls_made": tool_calls_made,
             "retries_made": retry_count,
         }
+
+    def _compact_historical_tool_results(self) -> None:
+        """Shrink tool results from completed turns before sending them again.
+
+        Called at the start of each turn, when every existing ``role='tool'``
+        message belongs to an already-answered turn. A run_mql result can carry
+        up to _max_rows rows of JSON that get re-sent verbatim on every
+        subsequent LLM call; the assistant has already summarised what mattered
+        into its answer, so we replace the bulky payload with row_count + the
+        first few rows. Only the *content* is rewritten — the message and its
+        tool_call_id stay in place, so tool_use/tool_result pairing (and the
+        API message format) is untouched.
+
+        Trade-off: a follow-up that needs raw historical rows ("the 5th row
+        from before") loses them and the agent must re-run the query.
+
+        Set env MANGO_COMPACT_TOOL_RESULTS=0 to disable (for A/B testing).
+        """
+        if os.getenv("MANGO_COMPACT_TOOL_RESULTS", "1").lower() in ("0", "false", "no"):
+            return
+        compacted = 0
+        saved = 0
+        for m in self._conversation:
+            if m.role != "tool" or not isinstance(m.content, str):
+                continue
+            if len(m.content) <= _COMPACT_TOOL_RESULT_THRESHOLD:
+                continue
+            if _COMPACT_MARKER in m.content:
+                continue  # already compacted
+            original_len = len(m.content)
+            m.content = self._summarize_tool_result(m.content)
+            compacted += 1
+            saved += original_len - len(m.content)
+        if compacted:
+            logger.info(
+                "Compacted %d historical tool result(s), saved ~%d chars (~%d tokens).",
+                compacted, saved, saved // 4,
+            )
+
+    @staticmethod
+    def _summarize_tool_result(text: str) -> str:
+        """Return a compact summary of a large tool-result string."""
+        start = text.find("{")
+        if start != -1:
+            try:
+                payload, _ = json.JSONDecoder().raw_decode(text[start:])
+            except (ValueError, TypeError):
+                payload = None
+            if isinstance(payload, dict) and isinstance(payload.get("rows"), list):
+                rows = payload["rows"]
+                n = payload.get("row_count", len(rows))
+                omitted = max(0, n - _COMPACT_SAMPLE_ROWS)
+                summary = {
+                    "row_count": n,
+                    "sample_rows": rows[:_COMPACT_SAMPLE_ROWS],
+                    _COMPACT_MARKER: f"{omitted} more rows omitted; re-run the query for full results",
+                }
+                return json.dumps(
+                    summary, default=str, ensure_ascii=False, separators=(",", ":")
+                )
+        # Generic fallback: keep the head, flag the omission.
+        head = text[:_COMPACT_HEAD_CHARS].rstrip()
+        return f"{head}… [{_COMPACT_MARKER}: {len(text) - _COMPACT_HEAD_CHARS} chars of tool output dropped; re-run to see the full result]"
 
     def _prune_conversation(self) -> None:
         """Remove oldest turns when conversation exceeds max_turns.

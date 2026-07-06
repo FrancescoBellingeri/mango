@@ -123,6 +123,8 @@ def run(
     introspect: bool,
     verbose: bool,
     memory_dir: str = ".mango_memory",
+    base_url: str | None = None,
+    temperature: float | None = None,
 ) -> None:
     _setup_logging(verbose)
 
@@ -149,7 +151,13 @@ def run(
 
     # Build LLM service via factory.
     try:
-        llm = build_llm(provider=provider, model=model, api_key=api_key)
+        llm = build_llm(
+            provider=provider,
+            model=model,
+            api_key=api_key,
+            base_url=base_url,
+            temperature=temperature,
+        )
     except Exception as exc:
         console.print(f"[red]LLM init failed:[/red] {exc}")
         sys.exit(1)
@@ -283,7 +291,19 @@ def main() -> None:
     _add_common_args(chat_parser)
     chat_parser.add_argument("--provider", default=os.getenv("MANGO_PROVIDER", "openai"), choices=PROVIDERS)
     chat_parser.add_argument("--model", default=os.getenv("MANGO_MODEL", "gpt-5.4"))
-    chat_parser.add_argument("--api-key", default=None)
+    chat_parser.add_argument("--api-key", default=os.getenv("MANGO_API_KEY"))
+    chat_parser.add_argument(
+        "--base-url",
+        default=os.getenv("MANGO_BASE_URL"),
+        help="Base URL for OpenAI-compatible providers (e.g. regolo.ai, Together AI). "
+             "Required with --provider openai for non-gpt models. Defaults to $MANGO_BASE_URL.",
+    )
+    chat_parser.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help="Sampling temperature. Omit for the provider default; set 0 for near-deterministic output.",
+    )
     chat_parser.add_argument("--no-schema", action="store_true", help="Skip schema introspection")
     chat_parser.add_argument("--no-memory", action="store_true", help="Disable memory layer")
     chat_parser.add_argument("--verbose", "-v", action="store_true")
@@ -344,6 +364,8 @@ def main() -> None:
         introspect=not args.no_schema,
         memory_dir=":memory:" if args.no_memory else args.memory_dir,
         verbose=args.verbose,
+        base_url=args.base_url,
+        temperature=args.temperature,
     )
 
 

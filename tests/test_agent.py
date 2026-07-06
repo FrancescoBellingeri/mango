@@ -455,3 +455,83 @@ class TestErrorRecovery:
 
         tool_msgs = [m for m in agent._conversation if m.role == "tool"]
         assert any("[MAX RETRIES EXCEEDED]" in str(m.content) for m in tool_msgs)
+
+
+# ---------------------------------------------------------------------------
+# Historical tool-result compaction (§9)
+# ---------------------------------------------------------------------------
+
+
+def _big_run_mql_content(n_rows: int = 100) -> str:
+    import json
+    rows = [
+        {"_id": f"id{i:06d}", "name": f"Product {i}", "price": i * 1.5,
+         "tier": "gold", "active": True}
+        for i in range(n_rows)
+    ]
+    return json.dumps(
+        {"rows": rows, "row_count": n_rows},
+        separators=(",", ":"),
+    )
+
+
+class TestHistoricalCompaction:
+    def test_large_run_mql_result_compacted(self, MockLLM, mongo_backend, tool_registry):
+        import json
+        from mango.llm.models import Message
+
+        agent, _ = _agent(MockLLM, mongo_backend, tool_registry, [])
+        big = _big_run_mql_content(100)
+        agent._conversation = [
+            Message(role="user", content="q1"),
+            Message(role="assistant", content=[{"type": "tool_use", "id": "tc1", "name": "run_mql", "input": {}}]),
+            Message(role="tool", content=big, tool_call_id="tc1"),
+            Message(role="assistant", content="answer 1"),
+        ]
+        agent._compact_historical_tool_results()
+
+        tool_msg = agent._conversation[2]
+        # Much smaller, pairing preserved.
+        assert len(tool_msg.content) < len(big) * 0.2
+        assert tool_msg.tool_call_id == "tc1"
+        payload = json.loads(tool_msg.content)
+        assert payload["row_count"] == 100
+        assert len(payload["sample_rows"]) == 3
+        assert "_compacted" in payload
+
+    def test_small_result_untouched(self, MockLLM, mongo_backend, tool_registry):
+        from mango.llm.models import Message
+
+        agent, _ = _agent(MockLLM, mongo_backend, tool_registry, [])
+        small = '{"rows":[{"count":42}],"row_count":1}'
+        agent._conversation = [Message(role="tool", content=small, tool_call_id="tc1")]
+        agent._compact_historical_tool_results()
+        assert agent._conversation[0].content == small
+
+    def test_idempotent(self, MockLLM, mongo_backend, tool_registry):
+        from mango.llm.models import Message
+
+        agent, _ = _agent(MockLLM, mongo_backend, tool_registry, [])
+        agent._conversation = [Message(role="tool", content=_big_run_mql_content(100), tool_call_id="tc1")]
+        agent._compact_historical_tool_results()
+        once = agent._conversation[0].content
+        agent._compact_historical_tool_results()
+        assert agent._conversation[0].content == once
+
+    def test_env_var_disables_compaction(self, MockLLM, mongo_backend, tool_registry, monkeypatch):
+        from mango.llm.models import Message
+
+        monkeypatch.setenv("MANGO_COMPACT_TOOL_RESULTS", "0")
+        agent, _ = _agent(MockLLM, mongo_backend, tool_registry, [])
+        big = _big_run_mql_content(100)
+        agent._conversation = [Message(role="tool", content=big, tool_call_id="tc1")]
+        agent._compact_historical_tool_results()
+        assert agent._conversation[0].content == big  # untouched
+
+    def test_generic_fallback_for_non_row_payload(self):
+        import json
+        # A large payload without a "rows" list (e.g. a describe schema dump).
+        big = json.dumps({"fields": [{"path": f"f{i}", "types": ["str"]} for i in range(200)]})
+        out = MangoAgent._summarize_tool_result(big)
+        assert len(out) < len(big)
+        assert "_compacted" in out
