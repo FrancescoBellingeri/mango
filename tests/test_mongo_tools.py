@@ -265,3 +265,36 @@ class TestInspectFieldTool:
     def test_definition_name(self, mongo_backend):
         tool = InspectFieldTool(mongo_backend)
         assert tool.definition.name == "inspect_field"
+
+
+# ---------------------------------------------------------------------------
+# Introspection cache (avoids re-sampling ~100 docs on every describe_collection)
+# ---------------------------------------------------------------------------
+
+
+class TestIntrospectCache:
+    def test_second_call_is_served_from_cache(self, mongo_backend):
+        # Fresh introspection builds a new SchemaInfo each time, so identity
+        # equality proves the second call returned the cached object.
+        first = mongo_backend._introspect_collection("users", {"users", "orders"})
+        second = mongo_backend._introspect_collection("users", {"users", "orders"})
+        assert first is second
+
+    def test_expired_entry_is_re_sampled(self, mongo_backend):
+        first = mongo_backend._introspect_collection("users", {"users", "orders"})
+        # Age the cached timestamp past the TTL.
+        schema, ts = mongo_backend._introspect_cache["users"]
+        mongo_backend._introspect_cache["users"] = (schema, ts - 10_000)
+        refreshed = mongo_backend._introspect_collection("users", {"users", "orders"})
+        assert refreshed is not first
+
+    def test_ttl_zero_disables_cache(self, mongo_client, mongo_db):
+        from mango.integrations.mongodb import MongoRunner
+
+        backend = MongoRunner(introspect_ttl_s=0)
+        backend._client = mongo_client
+        backend._db = mongo_db
+        first = backend._introspect_collection("users", {"users", "orders"})
+        second = backend._introspect_collection("users", {"users", "orders"})
+        assert first is not second
+        assert backend._introspect_cache == {}

@@ -7,6 +7,7 @@ All operations are read-only: find, aggregate, count, distinct.
 from __future__ import annotations
 
 import logging
+import time
 from collections import defaultdict
 from datetime import datetime
 from typing import Any
@@ -43,7 +44,9 @@ class MongoRunner(NoSQLRunner):
     and schema introspection. No write operations are possible.
     """
 
-    def __init__(self, max_time_ms: int = 30_000) -> None:
+    def __init__(
+        self, max_time_ms: int = 30_000, introspect_ttl_s: float = 300.0
+    ) -> None:
         self._client: MongoClient | None = None
         self._db: Database | None = None
         # Server-side time budget applied to every query so a pathological
@@ -54,6 +57,13 @@ class MongoRunner(NoSQLRunner):
         # schema-aware literal coercion. Populated lazily, kept for the runner's
         # lifetime (schema is stable within a session).
         self._field_type_cache: dict[str, dict[str, set[str]]] = {}
+        # Cache of collection → (SchemaInfo, monotonic timestamp). Introspection
+        # samples ~100 docs + reads index metadata on every call; describe_collection
+        # runs once per collection per question, so without a cache the same
+        # collection is re-sampled every turn. TTL bounds staleness on long-lived
+        # servers; set to 0 to disable caching.
+        self._introspect_ttl_s = introspect_ttl_s
+        self._introspect_cache: dict[str, tuple[SchemaInfo, float]] = {}
 
     # ------------------------------------------------------------------
     # Connection
@@ -241,6 +251,11 @@ class MongoRunner(NoSQLRunner):
     def _introspect_collection(
         self, collection_name: str, all_collections: set[str]
     ) -> SchemaInfo:
+        if self._introspect_ttl_s:
+            cached = self._introspect_cache.get(collection_name)
+            if cached is not None and (time.monotonic() - cached[1]) < self._introspect_ttl_s:
+                return cached[0]
+
         collection = self._database[collection_name]
 
         doc_count = collection.estimated_document_count()
@@ -268,13 +283,16 @@ class MongoRunner(NoSQLRunner):
         self._annotate_indexes(fields, indexed_fields, unique_fields)
         self._annotate_references(fields, all_collections)
 
-        return SchemaInfo(
+        schema = SchemaInfo(
             collection_name=collection_name,
             document_count=doc_count,
             fields=fields,
             indexes=indexes,
             sample_documents=samples[:5],
         )
+        if self._introspect_ttl_s:
+            self._introspect_cache[collection_name] = (schema, time.monotonic())
+        return schema
 
     # ------------------------------------------------------------------
     # Utility methods
