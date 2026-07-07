@@ -53,6 +53,8 @@ class FieldInfo:
     reference_collection: str | None = None
     sub_fields: list[FieldInfo] | None = None   # for subdocument fields
     array_element_types: list[str] | None = None
+    sample_values: list[str] | None = None      # distinct string values seen in the sample,
+                                                 # when the field looks categorical (≤25 distinct)
 
 
 @dataclass

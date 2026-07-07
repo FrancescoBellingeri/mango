@@ -36,6 +36,12 @@ _ALLOWED_OPERATIONS = {"find", "aggregate", "count", "distinct"}
 # How many documents to sample when inferring schema.
 _DEFAULT_SAMPLE_SIZE = 100
 
+# Max distinct string values tracked per field before it's considered free-text/
+# an identifier rather than categorical. Powers proactive value-grounding hints
+# (mango.agent.value_grounding) — a field within this cap is small enough that
+# its exact encodings (casing, spelling variants) are worth surfacing up front.
+_CATEGORICAL_MAX_DISTINCT = 25
+
 
 class MongoRunner(NoSQLRunner):
     """MongoDB backend using pymongo.
@@ -513,6 +519,12 @@ class MongoRunner(NoSQLRunner):
         field_counts: dict[str, int] = defaultdict(int)
         sub_docs: dict[str, list[dict]] = defaultdict(list)
         array_element_types: dict[str, set[str]] = defaultdict(set)
+        # Distinct string values per field, capped: once a field exceeds the cap
+        # it's dropped from tracking (free-text/identifier, not categorical).
+        # Only scalar string values are tracked — arrays of strings (e.g. tags)
+        # are a documented follow-up, not covered here.
+        field_values: dict[str, set[str]] = defaultdict(set)
+        field_values_overflowed: set[str] = set()
 
         total = len(docs)
 
@@ -528,6 +540,11 @@ class MongoRunner(NoSQLRunner):
                 elif isinstance(value, list):
                     for item in value:
                         array_element_types[path].add(MongoRunner._bson_type_name(item))
+                elif isinstance(value, str) and path not in field_values_overflowed:
+                    field_values[path].add(value)
+                    if len(field_values[path]) > _CATEGORICAL_MAX_DISTINCT:
+                        field_values_overflowed.add(path)
+                        del field_values[path]
 
         fields: list[FieldInfo] = []
         for path, types in field_types.items():
@@ -539,6 +556,7 @@ class MongoRunner(NoSQLRunner):
                 sub_fields = MongoRunner._infer_fields(sub_docs[path], prefix=path)
 
             arr_types = list(array_element_types[path]) if array_element_types[path] else None
+            sample_values = sorted(field_values[path]) if path in field_values else None
 
             fields.append(
                 FieldInfo(
@@ -548,6 +566,7 @@ class MongoRunner(NoSQLRunner):
                     frequency=round(frequency, 4),
                     array_element_types=arr_types,
                     sub_fields=sub_fields,
+                    sample_values=sample_values,
                 )
             )
 

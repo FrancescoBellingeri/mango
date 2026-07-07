@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from mango.agent.prompt_builder import build_system_prompt, format_memory_examples
+from mango.agent.prompt_builder import build_system_prompt, format_memory_examples, value_hints_section
 from mango.core.types import FieldInfo, SchemaInfo
 from mango.memory.models import MemoryEntry
 from mango.integrations.chromadb import make_entry_id
@@ -125,3 +125,27 @@ class TestFormatMemoryExamples:
         result = format_memory_examples([entry])
         assert "count" in result  # from tool_args
         assert "users" in result
+
+
+# ---------------------------------------------------------------------------
+# value_hints_section
+# ---------------------------------------------------------------------------
+
+
+class TestValueHintsSection:
+    def test_empty_list_returns_empty_string(self):
+        assert value_hints_section([]) == ""
+
+    def test_hints_included(self):
+        hints = ["- \"active\" -> in `orders.status` it is stored as 'ACTIVE'"]
+        result = value_hints_section(hints)
+        assert "orders.status" in result
+        assert "ACTIVE" in result
+
+    def test_header_present(self):
+        result = value_hints_section(["- some hint"])
+        assert "## Value hints" in result
+
+    def test_mentions_inspect_field_is_unnecessary(self):
+        result = value_hints_section(["- some hint"])
+        assert "inspect_field" in result

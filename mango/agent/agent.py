@@ -23,7 +23,13 @@ from typing import AsyncGenerator, Callable
 
 import re
 
-from mango.agent.prompt_builder import build_system_prompt, schema_section_for_query, _FULL_SCHEMA_THRESHOLD
+from mango.agent.prompt_builder import (
+    build_system_prompt,
+    schema_section_for_query,
+    value_hints_section,
+    _FULL_SCHEMA_THRESHOLD,
+)
+from mango.agent.value_grounding import ValueIndex, build_value_index, find_value_hints
 from mango.nosql_runner import NoSQLRunner
 from mango.core.types import SchemaInfo
 from mango.llm import LLMService, Message, SystemPromptPart
@@ -166,6 +172,7 @@ class MangoAgent:
         self._conversation: list[Message] = []
         self._ready: bool = False
         self._last_memory_entry_id: str | None = None
+        self._value_index: ValueIndex | None = None
 
     # ------------------------------------------------------------------
     # Properties
@@ -205,6 +212,9 @@ class MangoAgent:
             logger.info("Introspecting schema for %d collections…", len(collections))
             self._schema = self._db.introspect_schema()
 
+        if self._schema and self._value_index is None:
+            self._value_index = build_value_index(self._schema)
+
         # Schema is injected dynamically per-query in _prepare_turn; omit here.
         self._system_prompt = build_system_prompt(db_name=db_name, schema=None)
         self._ready = True
@@ -233,6 +243,7 @@ class MangoAgent:
         )
         agent._system_prompt = self._system_prompt
         agent._ready = self._ready
+        agent._value_index = self._value_index
         return agent
 
     async def ask(
@@ -488,8 +499,14 @@ class MangoAgent:
                 self._schema, relevant, total_collections=len(self._schema)
             ) + "\n\n"
 
+        value_hints_text = ""
+        if self._value_index:
+            hints = find_value_hints(question, self._value_index)
+            if hints:
+                value_hints_text = value_hints_section(hints) + "\n\n"
+
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S UTC")
-        dynamic = f"Current datetime: {now}\n\n{memory_context}{schema_section}".rstrip()
+        dynamic = f"Current datetime: {now}\n\n{memory_context}{schema_section}{value_hints_text}".rstrip()
         return memory_hits, [
             SystemPromptPart(text=self._system_prompt, cacheable=True),
             SystemPromptPart(text=dynamic, cacheable=False),

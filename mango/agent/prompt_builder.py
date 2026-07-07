@@ -72,7 +72,10 @@ def _rules_section() -> str:
         "If a query returns no results, explain why (wrong filter, empty collection, etc.).",
         "If the question is ambiguous, ask one clarifying question before querying.",
         "Limit results to a sensible number (≤100 rows). Never fetch unbounded results.",
-        "Before filtering or grouping on a categorical field by a specific value, call "
+        "If a '## Value hints' section is present below, it already tells you the exact "
+        "stored encoding for values mentioned in the question — use it directly in your "
+        "filter and do NOT call inspect_field for that field. "
+        "Otherwise, before filtering or grouping on a categorical field by a specific value, call "
         "inspect_field to confirm how its values are actually encoded — exact spelling, "
         "casing and data type — instead of assuming. If the same concept appears under "
         "more than one form, match all of them (e.g. $in, or a case-insensitive $regex). "
@@ -208,6 +211,28 @@ def _render_fields(fields: list[FieldInfo], indent: int = 0) -> str:
         if f.sub_fields:
             lines.append(_render_fields(f.sub_fields, indent + 1))
 
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Value-grounding hints
+# ---------------------------------------------------------------------------
+
+
+def value_hints_section(hints: list[str]) -> str:
+    """Render proactive value-grounding hints for the current question.
+
+    Returns an empty string when there are no hints — callers should skip the
+    section entirely rather than emit an empty header.
+    """
+    if not hints:
+        return ""
+    lines = [
+        "## Value hints for this question",
+        "Exact stored encoding for values mentioned above — use these directly "
+        "in your filter, no need to call inspect_field for them:",
+    ]
+    lines.extend(hints)
     return "\n".join(lines)
 
 

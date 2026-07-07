@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from mango.agent.agent import AgentResponse, MangoAgent
+from mango.core.types import FieldInfo, SchemaInfo
 from mango.llm.models import LLMResponse, ToolCall
 from mango.memory.models import MemoryEntry
 from mango.integrations.chromadb import ChromaAgentMemory as ChromaMemoryService, make_entry_id
@@ -455,6 +456,78 @@ class TestErrorRecovery:
 
         tool_msgs = [m for m in agent._conversation if m.role == "tool"]
         assert any("[MAX RETRIES EXCEEDED]" in str(m.content) for m in tool_msgs)
+
+
+# ---------------------------------------------------------------------------
+# Value-grounding hints wired into the per-turn system prompt
+# ---------------------------------------------------------------------------
+
+
+class TestAgentValueGrounding:
+    def _schema_with_status_drift(self) -> dict[str, SchemaInfo]:
+        return {
+            "orders": SchemaInfo(
+                collection_name="orders",
+                document_count=10,
+                fields=[
+                    FieldInfo(
+                        name="status", path="status", types=["string"], frequency=1.0,
+                        sample_values=["ACTIVE", "inactive"],
+                    ),
+                ],
+                indexes=[],
+                sample_documents=[],
+            )
+        }
+
+    async def test_value_hint_injected_when_question_matches_drifted_value(
+        self, MockLLM, mongo_backend, tool_registry
+    ):
+        llm = MockLLM([LLMResponse(text="Answer.", tool_calls=[])])
+        agent = MangoAgent(
+            llm_service=llm,
+            tool_registry=tool_registry,
+            db=mongo_backend,
+            schema=self._schema_with_status_drift(),
+            introspect=False,
+        )
+        agent.setup()
+        await agent.ask("how many active orders are there?")
+        system_prompt = llm.calls[0]["system_prompt"]
+        assert "## Value hints for this question" in system_prompt
+        assert "ACTIVE" in system_prompt
+
+    async def test_no_value_hint_when_question_has_no_match(
+        self, MockLLM, mongo_backend, tool_registry
+    ):
+        llm = MockLLM([LLMResponse(text="Answer.", tool_calls=[])])
+        agent = MangoAgent(
+            llm_service=llm,
+            tool_registry=tool_registry,
+            db=mongo_backend,
+            schema=self._schema_with_status_drift(),
+            introspect=False,
+        )
+        agent.setup()
+        await agent.ask("what is the total revenue?")
+        system_prompt = llm.calls[0]["system_prompt"]
+        assert "## Value hints for this question" not in system_prompt
+
+    async def test_value_index_shared_across_new_session(
+        self, MockLLM, mongo_backend, tool_registry
+    ):
+        llm = MockLLM([])
+        agent = MangoAgent(
+            llm_service=llm,
+            tool_registry=tool_registry,
+            db=mongo_backend,
+            schema=self._schema_with_status_drift(),
+            introspect=False,
+        )
+        agent.setup()
+        session = agent.new_session()
+        assert session._value_index == agent._value_index
+        assert session._value_index is not None
 
 
 # ---------------------------------------------------------------------------

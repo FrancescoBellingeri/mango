@@ -140,6 +140,56 @@ class TestInferFields:
 
 
 # ---------------------------------------------------------------------------
+# _infer_fields — sample_values (categorical value grounding)
+# ---------------------------------------------------------------------------
+
+
+class TestInferFieldsSampleValues:
+    def test_string_field_collects_distinct_values(self):
+        docs = [{"status": "active"}, {"status": "ACTIVE"}, {"status": "inactive"}]
+        fields = _infer_fields(docs)
+        status = next(f for f in fields if f.path == "status")
+        assert status.sample_values == ["ACTIVE", "active", "inactive"]
+
+    def test_non_string_field_has_no_sample_values(self):
+        docs = [{"age": 30}, {"age": 25}]
+        fields = _infer_fields(docs)
+        age = next(f for f in fields if f.path == "age")
+        assert age.sample_values is None
+
+    def test_field_over_cap_has_no_sample_values(self):
+        from mango.integrations.mongodb import _CATEGORICAL_MAX_DISTINCT
+
+        docs = [{"code": f"code-{i}"} for i in range(_CATEGORICAL_MAX_DISTINCT + 5)]
+        fields = _infer_fields(docs)
+        code = next(f for f in fields if f.path == "code")
+        assert code.sample_values is None
+
+    def test_field_at_cap_keeps_sample_values(self):
+        from mango.integrations.mongodb import _CATEGORICAL_MAX_DISTINCT
+
+        docs = [{"code": f"code-{i}"} for i in range(_CATEGORICAL_MAX_DISTINCT)]
+        fields = _infer_fields(docs)
+        code = next(f for f in fields if f.path == "code")
+        assert code.sample_values is not None
+        assert len(code.sample_values) == _CATEGORICAL_MAX_DISTINCT
+
+    def test_nested_subdocument_field_collects_sample_values(self):
+        docs = [{"address": {"country": "Italy"}}, {"address": {"country": "italy"}}]
+        fields = _infer_fields(docs)
+        addr = next(f for f in fields if f.path == "address")
+        country = next(f for f in addr.sub_fields if f.path == "address.country")
+        assert country.sample_values == ["Italy", "italy"]
+
+    def test_array_of_strings_not_collected(self):
+        """Documented v1 scope: array-of-scalars fields are not indexed for values."""
+        docs = [{"tags": ["python", "mongodb"]}]
+        fields = _infer_fields(docs)
+        tags = next(f for f in fields if f.path == "tags")
+        assert tags.sample_values is None
+
+
+# ---------------------------------------------------------------------------
 # _annotate_references
 # ---------------------------------------------------------------------------
 

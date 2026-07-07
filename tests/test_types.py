@@ -98,6 +98,17 @@ class TestFieldInfo:
         assert f.reference_collection is None
         assert f.array_element_types is None
         assert f.sub_fields is None
+        assert f.sample_values is None
+
+    def test_sample_values(self):
+        f = FieldInfo(
+            name="status",
+            path="status",
+            types=["string"],
+            frequency=1.0,
+            sample_values=["active", "ACTIVE", "inactive"],
+        )
+        assert f.sample_values == ["active", "ACTIVE", "inactive"]
 
     def test_with_all_fields(self):
         f = FieldInfo(
