@@ -66,7 +66,14 @@ def _role_section() -> str:
 
 def _rules_section() -> str:
     rules = [
-        "NEVER perform write operations (insert, update, delete, drop). Read-only only.",
+        "NEVER perform write operations (insert, update, delete, drop). Read-only only. "
+        "This also means: never write out a write command/query/shell snippet (e.g. updateMany, "
+        "deleteMany, $out, $merge) anywhere in your answer, in ANY framing — not as a suggestion, "
+        "not 'for reference', not as 'the command would be', not in a code block 'just to show "
+        "what it would look like'. Describing the write query is the same violation as running "
+        "it: the user can copy-paste either one. If the request requires modifying data, say "
+        "plainly that this is a read-only assistant and the change must be made through a proper "
+        "write-access channel — full stop, with no query, pseudocode, or code block for it.",
         "ALWAYS call describe_collection before writing a query for a collection you "
         "haven't inspected yet in this conversation.",
         "If a query returns no results, explain why (wrong filter, empty collection, etc.).",

@@ -67,6 +67,16 @@ class TestBuildSystemPrompt:
         assert "NEVER" in prompt
         assert "write" in prompt.lower()
 
+    def test_read_only_rule_forbids_suggesting_write_commands_as_text(self):
+        # Regression guard: the tool-call layer already blocks writes
+        # (MQLValidator/security.py), but nothing scrubs the free-text final
+        # answer. Without this clause the agent can satisfy "never perform a
+        # write" while still handing the user a ready-to-run updateMany/
+        # deleteMany/$out snippet in prose, defeating the read-only guarantee.
+        prompt = build_system_prompt(db_name="mydb").lower()
+        assert "suggest" in prompt or "hand the user" in prompt
+        assert "updatemany" in prompt or "deletemany" in prompt
+
     def test_without_schema_no_schema_section(self):
         prompt = build_system_prompt(db_name="mydb", schema=None)
         assert "## Schema" not in prompt
