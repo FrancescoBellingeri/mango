@@ -22,9 +22,44 @@ import re
 import chromadb
 from chromadb.config import Settings
 
-from mango.memory import MemoryEntry, MemoryService, TextMemoryEntry, TrainingEntry, make_entry_id
+from mango.memory import (
+    TEXT_MEMORY_SOURCES,
+    MemoryEntry,
+    MemoryService,
+    TextMemoryEntry,
+    TrainingEntry,
+    make_entry_id,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_text_provenance(
+    source: str = "manual",
+    verified: bool | None = None,
+) -> tuple[str, bool]:
+    """Normalize text-memory provenance. Unknown sources fall back to legacy."""
+    src = source if source in TEXT_MEMORY_SOURCES else "legacy"
+    if verified is None:
+        verified = src in ("manual", "import")
+    return src, bool(verified)
+
+
+def _text_meta_from_chroma(meta: dict | None) -> tuple[str, bool]:
+    """Read source/verified from Chroma metadata; missing → legacy/unverified."""
+    if not meta:
+        return "legacy", False
+    raw_source = meta.get("source")
+    if not raw_source or raw_source not in TEXT_MEMORY_SOURCES:
+        # Pre-provenance records only had {"type": "text"}.
+        return "legacy", False
+    raw_verified = meta.get("verified")
+    if raw_verified is None:
+        return raw_source, raw_source in ("manual", "import")
+    if isinstance(raw_verified, bool):
+        return raw_source, raw_verified
+    # Chroma may store bools as strings depending on version.
+    return raw_source, str(raw_verified).lower() in ("1", "true", "yes")
 
 # ---------------------------------------------------------------------------
 # Structural tagging (DAIL-SQL inspired)
@@ -232,17 +267,31 @@ class ChromaAgentMemory(MemoryService):
     # Text memory
     # ------------------------------------------------------------------
 
-    async def save_text(self, text: str) -> str:
+    async def save_text(
+        self,
+        text: str,
+        *,
+        source: str = "manual",
+        verified: bool | None = None,
+    ) -> str:
         """Store a free-form text memory. Returns the generated entry ID."""
         entry_id = make_entry_id()
+        src, is_verified = _resolve_text_provenance(source, verified)
 
         def _sync() -> None:
             self._text_collection.upsert(
                 ids=[entry_id],
                 documents=[text],
-                metadatas=[{"type": "text"}],
+                metadatas=[{
+                    "type": "text",
+                    "source": src,
+                    "verified": is_verified,
+                }],
             )
-            logger.debug("Stored text memory '%s'.", entry_id)
+            logger.debug(
+                "Stored text memory '%s' (source=%s verified=%s).",
+                entry_id, src, is_verified,
+            )
 
         await asyncio.to_thread(_sync)
         return entry_id
@@ -263,7 +312,7 @@ class ChromaAgentMemory(MemoryService):
             results = self._text_collection.query(
                 query_texts=[query],
                 n_results=n,
-                include=["documents", "distances"],
+                include=["documents", "distances", "metadatas"],
             )
 
             entries: list[TextMemoryEntry] = []
@@ -272,11 +321,16 @@ class ChromaAgentMemory(MemoryService):
                 similarity = max(0.0, 1.0 - distance)
                 if similarity < similarity_threshold:
                     continue
+                metas = results.get("metadatas") or [[]]
+                meta = metas[0][i] if metas and metas[0] else None
+                src, is_verified = _text_meta_from_chroma(meta)
                 entries.append(
                     TextMemoryEntry(
                         id=entry_id,
                         text=results["documents"][0][i],
                         similarity=round(similarity, 3),
+                        source=src,
+                        verified=is_verified,
                     )
                 )
             return entries
@@ -398,12 +452,16 @@ class ChromaAgentMemory(MemoryService):
             # Text entries
             text_total = self._text_collection.count()
             if text_total > 0:
-                results = self._text_collection.get(include=["documents"])
+                results = self._text_collection.get(include=["documents", "metadatas"])
                 for i, entry_id in enumerate(results["ids"]):
+                    meta = (results.get("metadatas") or [None])[i]
+                    src, is_verified = _text_meta_from_chroma(meta)
                     out.append({
                         "type": "text",
                         "id": entry_id,
                         "text": results["documents"][i],
+                        "source": src,
+                        "verified": is_verified,
                     })
 
             # Training entries
@@ -446,13 +504,28 @@ class ChromaAgentMemory(MemoryService):
                     ))
                     imported += 1
                 elif entry_type == "text":
-                    def _upsert_text(eid: str, text: str) -> None:
+                    src, is_verified = _resolve_text_provenance(
+                        raw.get("source", "import"),
+                        raw.get("verified"),
+                    )
+
+                    def _upsert_text(eid: str, text: str, source: str, verified: bool) -> None:
                         self._text_collection.upsert(
                             ids=[eid],
                             documents=[text],
-                            metadatas=[{"type": "text"}],
+                            metadatas=[{
+                                "type": "text",
+                                "source": source,
+                                "verified": verified,
+                            }],
                         )
-                    await asyncio.to_thread(_upsert_text, raw.get("id", make_entry_id()), raw["text"])
+                    await asyncio.to_thread(
+                        _upsert_text,
+                        raw.get("id", make_entry_id()),
+                        raw["text"],
+                        src,
+                        is_verified,
+                    )
                     imported += 1
                 elif entry_type == "training":
                     await self.train(TrainingEntry(

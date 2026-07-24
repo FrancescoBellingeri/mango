@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from mango.agent.prompt_builder import build_system_prompt, format_memory_examples, value_hints_section
+from mango.agent.prompt_builder import build_system_prompt, format_memory_examples, format_domain_notes, value_hints_section
 from mango.core.types import FieldInfo, SchemaInfo
-from mango.memory.models import MemoryEntry
+from mango.memory.models import MemoryEntry, TextMemoryEntry
 from mango.integrations.chromadb import make_entry_id
 
 
@@ -135,6 +135,28 @@ class TestFormatMemoryExamples:
         result = format_memory_examples([entry])
         assert "count" in result  # from tool_args
         assert "users" in result
+
+
+# ---------------------------------------------------------------------------
+# format_domain_notes (smoke — full coverage in test_text_memory_retrieval)
+# ---------------------------------------------------------------------------
+
+
+class TestFormatDomainNotesSmoke:
+    def test_empty_list_returns_empty_string(self):
+        assert format_domain_notes([]) == ""
+
+    def test_note_uses_retrieval_score_label(self):
+        note = TextMemoryEntry(
+            id="n1",
+            text="revenue = total_amount",
+            similarity=0.91,
+            source="manual",
+            verified=True,
+        )
+        result = format_domain_notes([note])
+        assert "retrieval_score=0.910" in result
+        assert "reference data" in result
 
 
 # ---------------------------------------------------------------------------

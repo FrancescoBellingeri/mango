@@ -67,11 +67,20 @@ class MemoryService(ABC):
     # ------------------------------------------------------------------
 
     @abstractmethod
-    async def save_text(self, text: str) -> str:
+    async def save_text(
+        self,
+        text: str,
+        *,
+        source: str = "manual",
+        verified: bool | None = None,
+    ) -> str:
         """Store a free-form text memory (business glossary, domain notes).
 
         Args:
             text: The text content to store.
+            source: Provenance — ``manual``, ``import``, ``llm``, or ``legacy``.
+            verified: Trust flag. When ``None``, inferred from ``source``
+                (``manual``/``import`` → True; ``llm``/``legacy`` → False).
 
         Returns:
             The generated entry ID.
@@ -92,7 +101,9 @@ class MemoryService(ABC):
             similarity_threshold: Minimum similarity score (0-1) to include.
 
         Returns:
-            List of TextMemoryEntry sorted by similarity.
+            List of TextMemoryEntry sorted by similarity (retrieval score).
+            Each entry carries ``source`` / ``verified`` when available;
+            missing metadata maps to ``source="legacy"``, ``verified=False``.
         """
 
     # ------------------------------------------------------------------

@@ -105,7 +105,11 @@ class SaveTextMemoryTool(Tool):
 
     async def execute(self, **kwargs: Any) -> ToolResult:
         try:
-            entry_id = await self._memory.save_text(kwargs["content"])
+            entry_id = await self._memory.save_text(
+                kwargs["content"],
+                source="llm",
+                verified=False,
+            )
             return ToolResult(success=True, data={"saved_id": entry_id})
         except Exception as exc:
             return ToolResult(success=False, error=str(exc))

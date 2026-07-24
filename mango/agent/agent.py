@@ -25,6 +25,7 @@ import re
 
 from mango.agent.prompt_builder import (
     build_system_prompt,
+    format_domain_notes,
     schema_section_for_query,
     value_hints_section,
     _FULL_SCHEMA_THRESHOLD,
@@ -137,6 +138,15 @@ class MangoAgent:
         max_retries: Max retries for fixable tool errors before giving up.
         memory_top_k: Number of memory examples to retrieve per question.
         max_turns: Number of conversation turns to keep in history.
+        enable_text_memory: Whether to retrieve and inject text/domain notes.
+        text_memory_top_k: Max text notes to retrieve per question.
+        text_memory_similarity_threshold: Conservative cosine similarity floor
+            for text-note retrieval (higher than tool-memory default).
+        text_memory_max_chars_per_note: Per-note character budget in the prompt.
+        text_memory_max_total_chars: Total character budget for all text notes.
+        text_memory_include_unverified: When False, skip llm/legacy notes.
+        auto_save_memory: When False, successful run_mql results are not
+            persisted (frozen-memory A/B / evaluation mode).
     """
 
     def __init__(
@@ -154,6 +164,13 @@ class MangoAgent:
         max_turns: int = 5,
         schema_top_k: int = 3,
         schema_always_all: int = 4,
+        enable_text_memory: bool = True,
+        text_memory_top_k: int = 2,
+        text_memory_similarity_threshold: float = 0.55,
+        text_memory_max_chars_per_note: int = 500,
+        text_memory_max_total_chars: int = 1200,
+        text_memory_include_unverified: bool = True,
+        auto_save_memory: bool = True,
     ) -> None:
         self._llm = llm_service
         self._db = db
@@ -168,6 +185,13 @@ class MangoAgent:
         self._max_turns = max_turns
         self._schema_top_k = schema_top_k
         self._schema_always_all = schema_always_all
+        self._enable_text_memory = enable_text_memory
+        self._text_memory_top_k = text_memory_top_k
+        self._text_memory_similarity_threshold = text_memory_similarity_threshold
+        self._text_memory_max_chars_per_note = text_memory_max_chars_per_note
+        self._text_memory_max_total_chars = text_memory_max_total_chars
+        self._text_memory_include_unverified = text_memory_include_unverified
+        self._auto_save_memory = auto_save_memory
         self._system_prompt: str = ""
         self._conversation: list[Message] = []
         self._ready: bool = False
@@ -240,6 +264,13 @@ class MangoAgent:
             max_turns=self._max_turns,
             schema_top_k=self._schema_top_k,
             schema_always_all=self._schema_always_all,
+            enable_text_memory=self._enable_text_memory,
+            text_memory_top_k=self._text_memory_top_k,
+            text_memory_similarity_threshold=self._text_memory_similarity_threshold,
+            text_memory_max_chars_per_note=self._text_memory_max_chars_per_note,
+            text_memory_max_total_chars=self._text_memory_max_total_chars,
+            text_memory_include_unverified=self._text_memory_include_unverified,
+            auto_save_memory=self._auto_save_memory,
         )
         agent._system_prompt = self._system_prompt
         agent._ready = self._ready
@@ -481,13 +512,20 @@ class MangoAgent:
                         )
                     ]
                 if entries:
-                    memory_hits = len(entries)
+                    memory_hits += len(entries)
                     lines = ["## Similar past interactions\n"]
                     for e in entries:
                         lines.append(f"Q: {e.question}")
                         lines.append(f"Tool: {e.tool_name} | Args: {e.tool_args}")
                         lines.append(f"Result: {e.result_summary}\n")
                     sections.append("\n".join(lines))
+
+            text_section = await self._retrieve_domain_notes(question)
+            if text_section:
+                # Count injected notes from the section markers for memory_hits.
+                injected = text_section.count("<<<DOMAIN_NOTE ")
+                memory_hits += injected
+                sections.append(text_section)
 
             if sections:
                 memory_context = "\n\n".join(sections) + "\n\n"
@@ -511,6 +549,80 @@ class MangoAgent:
             SystemPromptPart(text=self._system_prompt, cacheable=True),
             SystemPromptPart(text=dynamic, cacheable=False),
         ]
+
+    async def _retrieve_domain_notes(self, question: str) -> str:
+        """Retrieve and format text memories for the dynamic system prompt.
+
+        Failures in the memory backend are logged and swallowed so a broken
+        vector store cannot take down the agent turn. Empty stores skip the
+        section entirely (no empty header).
+        """
+        if (
+            not self._enable_text_memory
+            or self._memory is None
+            or self._text_memory_top_k <= 0
+        ):
+            return ""
+
+        try:
+            # Over-fetch slightly when filtering unverified so top_k still fills.
+            fetch_k = self._text_memory_top_k
+            if not self._text_memory_include_unverified:
+                fetch_k = min(self._text_memory_top_k * 3, 12)
+
+            found = await self._memory.search_text(
+                question,
+                top_k=fetch_k,
+                similarity_threshold=self._text_memory_similarity_threshold,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Text-memory retrieval failed (%s); continuing without domain notes.",
+                type(exc).__name__,
+            )
+            return ""
+
+        if not found:
+            logger.debug("Text-memory retrieval: found=0 injected=0")
+            return ""
+
+        excluded: list[str] = []
+        eligible = []
+        for note in found:
+            if not self._text_memory_include_unverified and not note.verified:
+                excluded.append(
+                    f"{note.id[:8]}… source={note.source} reason=unverified"
+                )
+                continue
+            eligible.append(note)
+
+        eligible = eligible[: self._text_memory_top_k]
+        section = format_domain_notes(
+            eligible,
+            max_chars_per_note=self._text_memory_max_chars_per_note,
+            max_total_chars=self._text_memory_max_total_chars,
+        )
+        injected = section.count("<<<DOMAIN_NOTE ") if section else 0
+
+        # Observability: IDs/source/score only — never log note bodies (may be sensitive).
+        injected_meta = [
+            {
+                "id": n.id,
+                "source": n.source,
+                "verified": n.verified,
+                "retrieval_score": n.similarity,
+            }
+            for n in eligible[:injected]
+        ]
+        logger.debug(
+            "Text-memory retrieval: found=%d eligible=%d injected=%d excluded=%s injected_meta=%s",
+            len(found),
+            len(eligible),
+            injected,
+            excluded or "[]",
+            injected_meta,
+        )
+        return section
 
     async def _run_loop(
         self,
@@ -757,7 +869,7 @@ class MangoAgent:
 
     async def _commit_memory(self, entry: MemoryEntry | None) -> None:
         """Persist the final run_mql entry to memory. No-op if entry is None or memory disabled."""
-        if self._memory is None or entry is None:
+        if self._memory is None or entry is None or not self._auto_save_memory:
             return
         try:
             await self._memory.store(entry)

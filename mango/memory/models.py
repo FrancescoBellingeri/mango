@@ -24,13 +24,28 @@ class MemoryEntry:
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
 
 
+# Provenance for text memories. Legacy records without metadata map to "legacy".
+TEXT_MEMORY_SOURCES = frozenset({"manual", "import", "llm", "legacy"})
+
+
 @dataclass
 class TextMemoryEntry:
-    """A stored free-form text memory (glossary, domain notes, etc.)."""
+    """A stored free-form text memory (glossary, domain notes, etc.).
+
+    Provenance policy (P1 / §5):
+      - ``manual`` / ``import``: human- or API-supplied; ``verified=True`` by default.
+      - ``llm``: written by the agent via ``save_text_memory``; never treated as verified.
+      - ``legacy``: pre-provenance records; conservative — ``verified=False``.
+
+    Retrieval always frames notes as non-authoritative reference data regardless
+    of ``verified``. Callers may exclude unverified notes via agent config.
+    """
 
     id: str
     text: str
-    similarity: float = 0.0  # filled in by search_text()
+    similarity: float = 0.0  # filled in by search_text() — retrieval score, not confidence
+    source: str = "legacy"
+    verified: bool = False
 
 
 @dataclass

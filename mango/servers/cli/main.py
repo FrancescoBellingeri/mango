@@ -99,7 +99,11 @@ async def _load_training_file(memory: ChromaAgentMemory, file_path: str) -> None
                     await memory.train(entry)
                     imported += 1
                 elif entry_type == "text":
-                    await memory.save_text(raw["text"])
+                    await memory.save_text(
+                        raw["text"],
+                        source=raw.get("source", "import"),
+                        verified=raw.get("verified"),
+                    )
                     imported += 1
                 else:
                     console.print(f"[yellow]Line {lineno}: unknown type '{entry_type}' — skipped[/yellow]")
