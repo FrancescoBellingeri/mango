@@ -12,3 +12,9 @@ mango_benchmark/results/
 mango_benchmark/splits/
 notes/
 graphify-out/
+
+.serena/
+natural-language-to-mongosh/
+.eai_memory/
+.claude/
+.vscode/
