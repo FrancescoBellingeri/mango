@@ -6,9 +6,27 @@ interface ToolStep {
   args: Record<string, unknown>
   success?: boolean
   preview?: string
+  denied?: string      // reason, when an access-control middleware blocked the call
   done: boolean
   expanded: boolean
 }
+
+/**
+ * Demo users — must match the USERS table in examples/complete_example.py.
+ * The selected name is sent as the `X-User` header; the server's `user_for`
+ * maps it to a user object and the middlewares decide what that user may do.
+ */
+interface DemoUser {
+  id: string
+  label: string
+  hint: string
+}
+
+const USERS: DemoUser[] = [
+  { id: 'alice', label: 'alice · admin', hint: 'sees everything' },
+  { id: 'bob', label: 'bob · support (IT)', hint: 'users limited to Italy, PII hidden, no memory' },
+  { id: 'carol', label: 'carol · finance', hint: 'orders/payments/ledger, no listing of payments' },
+]
 
 interface MessageMeta {
   iterations: number
@@ -41,6 +59,23 @@ function renderMarkdown(text: string): string {
 
 const sessionId = ref<string | null>(null)
 const messages = ref<Message[]>([])
+const currentUser = ref<string>(USERS[0]!.id)
+
+onMounted(() => {
+  try {
+    const saved = localStorage.getItem('mango:user')
+    if (saved && USERS.some(u => u.id === saved)) currentUser.value = saved
+  } catch { /* storage unavailable */ }
+})
+
+// A session is bound to the user that created it (the server answers 403
+// otherwise), so switching user always starts a fresh conversation.
+watch(currentUser, (id) => {
+  try { localStorage.setItem('mango:user', id) } catch { /* ignore */ }
+  resetSession()
+})
+
+const currentUserHint = computed(() => USERS.find(u => u.id === currentUser.value)?.hint ?? '')
 const input = ref('')
 const isLoading = ref(false)
 const messagesEnd = ref<HTMLElement | null>(null)
@@ -85,11 +120,18 @@ async function sendMessage() {
   try {
     const res = await fetch('/api/v1/ask/stream', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-User': currentUser.value },
       body: JSON.stringify({ question, session_id: sessionId.value }),
     })
 
-    if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`)
+    if (!res.ok || !res.body) {
+      let detail = `HTTP ${res.status}`
+      try {
+        const body = await res.json()
+        if (body?.detail) detail += ` — ${typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail)}`
+      } catch { /* no JSON body */ }
+      throw new Error(detail)
+    }
 
     const reader = res.body.getReader()
     const decoder = new TextDecoder()
@@ -142,6 +184,8 @@ function handleEvent(msg: Message, event: Record<string, unknown>) {
         step.success = event.success as boolean
         step.preview = event.preview as string
         step.done = true
+        const m = /\[ACCESS DENIED\][^\n]*\nReason: ([^\n]*)/.exec(step.preview ?? '')
+        if (m) step.denied = m[1]
       }
       break
     }
@@ -160,7 +204,9 @@ function handleEvent(msg: Message, event: Record<string, unknown>) {
       break
 
     case 'error':
-      msg.text = `⚠ ${event.message as string}`
+      msg.text = event.code === 'access_denied'
+        ? `🔒 Access denied: ${event.message as string}`
+        : `⚠ ${event.message as string}${event.request_id ? ` (request ${event.request_id})` : ''}`
       break
   }
 }
@@ -178,9 +224,11 @@ function onKeydown(e: KeyboardEvent) {
 }
 
 const SUGGESTIONS = [
-  'How many documents are in each collection?',
-  'Show me the most recent records',
-  'What fields does the main collection have?',
+  'Quanti utenti ci sono?',
+  'Dammi email e telefono di 3 utenti',
+  'Quante righe ci sono in ledger_entries?',
+  'Totale pagamenti per metodo',
+  'Mostrami 5 pagamenti',
 ]
 </script>
 
@@ -196,14 +244,25 @@ const SUGGESTIONS = [
         <span class="font-semibold text-base tracking-tight" style="color: #f0f0f0;">Mango</span>
         <span class="text-xs font-mono hidden sm:inline" style="color: #555;">MongoDB AI</span>
       </div>
-      <button
-        v-if="messages.length > 0"
-        @click="resetSession"
-        class="new-chat-btn text-xs font-medium px-3.5 py-1.5 rounded-lg transition-all cursor-pointer"
-      >
-        + New chat
-      </button>
+      <div class="flex items-center gap-3">
+        <label class="flex items-center gap-2 text-xs" style="color: #666;">
+          <span class="hidden sm:inline">User</span>
+          <select v-model="currentUser" :disabled="isLoading" class="user-select text-xs font-mono px-2.5 py-1.5 rounded-lg cursor-pointer">
+            <option v-for="u in USERS" :key="u.id" :value="u.id">{{ u.label }}</option>
+          </select>
+        </label>
+        <button
+          v-if="messages.length > 0"
+          @click="resetSession"
+          class="new-chat-btn text-xs font-medium px-3.5 py-1.5 rounded-lg transition-all cursor-pointer"
+        >
+          + New chat
+        </button>
+      </div>
     </header>
+    <div class="shrink-0 px-6 py-1.5 text-xs font-mono" style="background: #131313; border-bottom: 1px solid #222; color: #555;">
+      <span style="color: #f97316;">{{ currentUser }}</span> — {{ currentUserHint }}
+    </div>
 
     <!-- Messages -->
     <main class="flex-1 overflow-y-auto">
@@ -251,6 +310,7 @@ const SUGGESTIONS = [
                     <span v-else style="color: #f87171;">✗</span>
                   </span>
                   <span style="color: #888;">{{ step.name }}</span>
+                  <span v-if="step.denied" class="denied-badge px-1.5 py-0.5 rounded">🔒 blocked — {{ step.denied }}</span>
                   <button
                     v-if="step.done && step.preview"
                     @click="step.expanded = !step.expanded"
@@ -339,6 +399,24 @@ const SUGGESTIONS = [
   color: #f97316;
   border-color: #f97316;
   background: rgba(249, 115, 22, 0.08);
+}
+
+/* User selector */
+.user-select {
+  background: #1a1a1a;
+  border: 1px solid #2a2a2a;
+  color: #e0e0e0;
+  outline: none;
+}
+.user-select:focus { border-color: #f97316; }
+.user-select:disabled { opacity: 0.5; cursor: default; }
+
+/* Blocked tool call */
+.denied-badge {
+  color: #fbbf24;
+  background: rgba(251, 191, 36, 0.08);
+  border: 1px solid rgba(251, 191, 36, 0.3);
+  font-family: inherit;
 }
 
 /* User bubble — orange accent */

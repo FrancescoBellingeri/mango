@@ -30,6 +30,7 @@ _UUID_RE = re.compile(
 
 from mango.integrations import MongoRunner
 from mango.core.types import QueryRequest
+from mango.core.access import apply_after_query, apply_before_query
 from mango.llm import ToolDef, ToolParam
 from mango.tools.base import Tool, ToolResult
 from mango.tools.validator import MQLValidator
@@ -409,6 +410,8 @@ class RunMQLTool(Tool):
             limit=limit,
             distinct_field=kwargs.get("distinct_field"),
         )
+        # Access-control middlewares may rewrite (row filters) or deny the query.
+        request = apply_before_query(request)
 
         warnings: list[str] = []
         if self._validator is not None:
@@ -417,7 +420,7 @@ class RunMQLTool(Tool):
                 return ToolResult(success=False, error=validation.as_tool_error())
             warnings = validation.warnings
 
-        rows = self._backend.execute_query(request)
+        rows = apply_after_query(request, self._backend.execute_query(request))
 
         data: dict = {"rows": rows, "row_count": len(rows)}
         if warnings:
@@ -514,6 +517,7 @@ class ExplainQueryTool(Tool):
             sort=kwargs.get("sort"),
             distinct_field=kwargs.get("distinct_field"),
         )
+        request = apply_before_query(request)
 
         if self._validator is not None:
             validation = self._validator.validate(request)
@@ -871,6 +875,7 @@ def _run_explain(backend: MongoRunner, request: QueryRequest) -> dict:
     Returns an empty dict when the backend does not support explain
     (e.g. mongomock) or when the operation is not supported.
     """
+    backend.check_collection_access(request.collection)
     db = backend._database
     col = db[request.collection]
 

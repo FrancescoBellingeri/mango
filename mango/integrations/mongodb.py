@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import time
 from collections import defaultdict
+from collections.abc import Iterable
 from datetime import datetime
 from typing import Any
 
@@ -18,7 +19,8 @@ from pymongo import MongoClient
 from pymongo.database import Database
 
 from mango.nosql_runner import NoSQLRunner
-from mango.core.security import find_forbidden_operators
+from mango.core.access import current_collection_policy
+from mango.core.security import CollectionPolicy, enforce_read_only_policy
 from mango.core.types import (
     BackendError,
     FieldInfo,
@@ -51,10 +53,22 @@ class MongoRunner(NoSQLRunner):
     """
 
     def __init__(
-        self, max_time_ms: int = 30_000, introspect_ttl_s: float = 300.0
+        self,
+        max_time_ms: int = 30_000,
+        introspect_ttl_s: float = 300.0,
+        allowed_collections: Iterable[str] | None = None,
+        denied_collections: Iterable[str] | None = None,
     ) -> None:
         self._client: MongoClient | None = None
         self._db: Database | None = None
+        # Collection access policy: when ``allowed_collections`` is given only
+        # those are visible/queryable; ``denied_collections`` are never exposed;
+        # ``system.*`` is always hidden. Enforced on listing, introspection,
+        # profiling and execution — including collections pulled in through
+        # $lookup / $graphLookup / $unionWith.
+        self._collection_policy = CollectionPolicy(
+            allowed=allowed_collections, denied=denied_collections
+        )
         # Server-side time budget applied to every query so a pathological
         # scan (missing index, huge $group) cannot hang the worker forever.
         # 0 disables the limit.
@@ -92,6 +106,7 @@ class MongoRunner(NoSQLRunner):
             self._db = self._client[db_name]
             self._client.admin.command("ping")
             logger.info("Connected to MongoDB database '%s'", db_name)
+            self._warn_if_not_read_only()
         except pymongo.errors.ConfigurationError as exc:
             raise BackendError(
                 "No database name found in connection string. "
@@ -100,11 +115,49 @@ class MongoRunner(NoSQLRunner):
         except pymongo.errors.ConnectionFailure as exc:
             raise BackendError(f"Cannot connect to MongoDB: {exc}") from exc
 
+    def _warn_if_not_read_only(self) -> None:
+        """Warn when the connected MongoDB user holds write privileges.
+
+        Mango's own denylist is the *second* ring of the read-only guarantee;
+        the first is a database user limited to the ``read`` role. Best effort:
+        a user without ``connectionStatus`` privileges just skips the check.
+        """
+        try:
+            status = self._client.admin.command("connectionStatus")  # type: ignore[union-attr]
+            roles = status.get("authInfo", {}).get("authenticatedUserRoles", [])
+        except Exception:
+            return
+        if not roles:
+            logger.warning(
+                "MongoDB connection is unauthenticated: the read-only guarantee "
+                "relies solely on Mango's query policy. Prefer a user with the "
+                "'read' role on this database."
+            )
+            return
+        risky = sorted({r.get("role", "") for r in roles} - {"read", "readAnyDatabase"})
+        if risky:
+            logger.warning(
+                "MongoDB user has write-capable role(s) %s. Mango blocks writes "
+                "at the query level, but a user restricted to the 'read' role is "
+                "the only hard guarantee.",
+                risky,
+            )
+
     @property
     def _database(self) -> Database:
         if self._db is None:
             raise BackendError("Not connected. Call connect() first.")
         return self._db
+
+    @property
+    def collection_policy(self) -> CollectionPolicy:
+        """Effective policy: the runner's static one combined with the
+        per-turn policy set by access-control middlewares (if any)."""
+        return self._collection_policy.combined(current_collection_policy())
+
+    def check_collection_access(self, collection: str) -> None:
+        """Raise ValidationError when *collection* is not accessible."""
+        self.collection_policy.check(collection)
 
     # ------------------------------------------------------------------
     # Query execution
@@ -133,16 +186,19 @@ class MongoRunner(NoSQLRunner):
                 f"Allowed: {sorted(_ALLOWED_OPERATIONS)}"
             )
 
-        # Defence-in-depth: block write / server-side-JS / streaming operators
-        # regardless of whether pre-execution validation ran. The read-only
-        # guarantee must not be optional.
-        forbidden = find_forbidden_operators(operation.filter, operation.pipeline)
-        if forbidden:
-            raise ValidationError(
-                f"Forbidden operator(s) {forbidden} are not permitted "
-                "(read-only: no $out/$merge, no server-side JavaScript, "
-                "no change streams or administrative stages)."
-            )
+        # Defence-in-depth: block write / server-side-JS / admin operators at
+        # any depth (filter, pipeline, projection, sort), enforce the stage
+        # allowlist and the collection policy — regardless of whether
+        # pre-execution validation ran. The read-only guarantee must not be
+        # optional.
+        enforce_read_only_policy(
+            collection=operation.collection,
+            filter_doc=operation.filter,
+            pipeline=operation.pipeline,
+            projection=operation.projection,
+            sort=operation.sort,
+            collection_policy=self.collection_policy,
+        )
 
         collection = self._database[operation.collection]
 
@@ -257,6 +313,7 @@ class MongoRunner(NoSQLRunner):
     def _introspect_collection(
         self, collection_name: str, all_collections: set[str]
     ) -> SchemaInfo:
+        self.collection_policy.check(collection_name)
         if self._introspect_ttl_s:
             cached = self._introspect_cache.get(collection_name)
             if cached is not None and (time.monotonic() - cached[1]) < self._introspect_ttl_s:
@@ -317,6 +374,7 @@ class MongoRunner(NoSQLRunner):
         Raises:
             BackendError: If the collection does not exist.
         """
+        self.collection_policy.check(collection)
         try:
             docs = list(self._database[collection].find().limit(n))
         except pymongo.errors.PyMongoError as exc:
@@ -337,6 +395,8 @@ class MongoRunner(NoSQLRunner):
         cached = self._field_type_cache.get(collection)
         if cached is not None:
             return cached
+        if not self.collection_policy.is_allowed(collection):
+            return {}
 
         try:
             docs = list(self._database[collection].find().limit(sample_size))
@@ -362,9 +422,10 @@ class MongoRunner(NoSQLRunner):
             BackendError: If listing fails.
         """
         try:
-            return sorted(self._database.list_collection_names())
+            names = self._database.list_collection_names()
         except pymongo.errors.PyMongoError as exc:
             raise BackendError(f"Cannot list collections: {exc}") from exc
+        return sorted(self.collection_policy.filter(names))
 
     def get_indexes(self, collection: str) -> list[dict]:
         """Return index definitions for a collection.
@@ -378,6 +439,7 @@ class MongoRunner(NoSQLRunner):
         Raises:
             BackendError: If the collection does not exist.
         """
+        self.collection_policy.check(collection)
         try:
             return list(
                 self._database[collection].index_information().values()
@@ -414,6 +476,7 @@ class MongoRunner(NoSQLRunner):
         Raises:
             BackendError: If the collection cannot be accessed at all.
         """
+        self.collection_policy.check(collection)
         try:
             coll = self._database[collection]
             total = coll.estimated_document_count()

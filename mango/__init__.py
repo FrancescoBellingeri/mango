@@ -3,34 +3,37 @@
 Quick start::
 
     from mango import MangoAgent
-    from mango.core.registry import ToolRegistry
-    from mango.tools import ListCollectionsTool, DescribeCollectionTool, RunMQLTool
-    from mango.servers.fastapi import MangoFastAPIServer
-    from mango.integrations.google import GeminiLlmService
-    from mango.integrations.mongodb import MongoBackend
+    from mango.tools import ToolRegistry, build_mongo_tools, SaveTextMemoryTool
+    from mango.integrations.anthropic import AnthropicLlmService
+    from mango.integrations.mongodb import MongoRunner
     from mango.integrations.chromadb import ChromaAgentMemory
+    from mango.servers.fastapi import MangoFastAPIServer
 
-    llm = GeminiLlmService(model="gemini-2.5-pro-preview-05-06", api_key="...")
-    backend = MongoBackend()
-    backend.connect("mongodb://localhost:27017/mydb")
-    agent_memory = ChromaAgentMemory(persist_directory="./chroma_db")
+    llm = AnthropicLlmService(model="claude-sonnet-4-6", api_key="...")
+    db = MongoRunner()
+    db.connect("mongodb://localhost:27017/mydb")
+    agent_memory = ChromaAgentMemory(persist_dir="./chroma_db")
 
     tools = ToolRegistry()
-    tools.register(ListCollectionsTool(backend))
-    tools.register(DescribeCollectionTool(backend))
-    tools.register(RunMQLTool(backend))
+    for tool in build_mongo_tools(db):
+        tools.register(tool)
+    tools.register(SaveTextMemoryTool(agent_memory))
 
     agent = MangoAgent(
         llm_service=llm,
         tool_registry=tools,
-        backend=backend,
+        db=db,
         agent_memory=agent_memory,
+        introspect=True,
     )
 
-    server = MangoFastAPIServer(agent)
+    # Per-user permissions: see mango.middleware
+    server = MangoFastAPIServer(agent, user_for=lambda request: request.state.user)
     server.run()  # http://localhost:8000
 """
 
 from mango.agent.agent import AgentResponse, MangoAgent
 
-__all__ = ["MangoAgent", "AgentResponse"]
+__version__ = "0.2.0"
+
+__all__ = ["MangoAgent", "AgentResponse", "__version__"]

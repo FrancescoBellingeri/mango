@@ -12,7 +12,9 @@ class OpenAILlmService(LLMService):
 
     Args:
         api_key: OpenAI API key. If None, reads OPENAI_API_KEY from env.
-        model: Model ID to use. Defaults to gpt-4o.
+        model: Model ID to use. Defaults to gpt-5.4.
+        base_url: Custom endpoint for OpenAI-compatible servers.
+        temperature: Sampling temperature (omit for reasoning models).
         max_completion_tokens: Max tokens in the response.
     """
 
