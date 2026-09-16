@@ -7,7 +7,7 @@ clean, consistent class name. Import from here in user scripts:
     from mango.integrations.anthropic import AnthropicLlmService
     from mango.integrations.openai import OpenAILlmService
     from mango.integrations.ollama import OllamaLlmService
-    from mango.integrations.mongodb import MongoBackend
+    from mango.integrations.mongodb import MongoRunner
     from mango.integrations.chromadb import ChromaAgentMemory
 """
 

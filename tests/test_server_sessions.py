@@ -55,7 +55,7 @@ class StubAgent:
         self.children.append(child)
         return child
 
-    async def ask_stream(self, question: str):
+    async def ask_stream(self, question: str, user=None):
         self.conversation.append(f"start:{question}")
         await asyncio.sleep(0.02)  # control returns to the event loop here
         self.conversation.append(f"end:{question}")
@@ -169,7 +169,7 @@ class TestErrorLeak:
             def new_session(self):
                 return self
 
-            async def ask_stream(self, question):
+            async def ask_stream(self, question, user=None):
                 raise RuntimeError(f"boom {secret}")
                 yield  # unreachable — makes this an async generator
 

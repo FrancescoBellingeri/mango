@@ -103,6 +103,14 @@ class ValidationError(MangoError):
     """Raised when a query fails pre-execution validation."""
 
 
+class AccessDenied(MangoError):
+    """Raised by an access-control middleware to block a tool call or query.
+
+    The agent turns it into a tool error the LLM can explain to the user
+    ("you don't have access to collection X") instead of retrying.
+    """
+
+
 class BackendError(MangoError):
     """Raised when the database backend encounters an error."""
 

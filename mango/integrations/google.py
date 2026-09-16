@@ -3,10 +3,10 @@
 Supports both Google AI Studio (api_key) and Vertex AI (vertexai=True).
 
 Google AI Studio:
-    GeminiService(api_key="YOUR_KEY", model="gemini-2.5-pro-preview-05-06")
+    GeminiLlmService(api_key="YOUR_KEY", model="gemini-3.1-flash-lite-preview")
 
 Vertex AI:
-    GeminiService(vertexai=True, model="gemini-3.1-pro-preview")
+    GeminiLlmService(vertexai=True, model="gemini-3.1-pro-preview")
     # reads GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_LOCATION from env,
     # or uses Application Default Credentials.
 """
@@ -29,7 +29,7 @@ class GeminiLlmService(LLMService):
     Args:
         api_key: Google AI Studio API key. If None, reads GOOGLE_API_KEY from env.
                  Not needed when vertexai=True.
-        model: Model ID. Defaults to gemini-2.5-pro-preview-05-06.
+        model: Model ID. Defaults to gemini-3.1-flash-lite-preview.
         vertexai: If True, uses Vertex AI instead of Google AI Studio.
                   Reads GOOGLE_CLOUD_PROJECT / GOOGLE_CLOUD_LOCATION from env.
         max_output_tokens: Max tokens in the response.

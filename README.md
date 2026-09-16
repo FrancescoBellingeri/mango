@@ -203,7 +203,81 @@ Mango: Done — removed from memory ✓
 | `explain_query` | *(opt-in)* Explain a query step-by-step in plain language + MongoDB execution stats. |
 | `delete_last_memory_entry` | *(opt-in)* Remove the last auto-saved entry when the user says a result was wrong. |
 
-> **Read-only by design.** `run_mql` only accepts `find`, `aggregate`, `count`, `distinct`. Write operations are rejected at the tool level.
+> **Read-only by design.** `run_mql` only accepts `find`, `aggregate`, `count`, `distinct`. Write and server-side-JavaScript operators (`$out`, `$merge`, `$where`, `$function`, `$accumulator`), change streams and administrative stages are rejected at any depth of the filter, projection, sort or pipeline — by the validator *and* again by the runner, so the guarantee cannot be switched off.
+
+### Security checklist for production
+
+1. **Connect with a `read`-only MongoDB user.** Mango's query policy is the second ring of defence; the database role is the first. Mango logs a warning at connect time when the user holds write-capable roles.
+2. **Authenticate in `user_for`.** Mango has no accounts of its own: the callback you pass to `MangoFastAPIServer(agent, user_for=…)` or `mango_router(agent, user_for=…)` is where your authentication runs — read your session, verify your JWT, or check an API key — and it returns *your* user object (or raises `HTTPException(401)`):
+   ```python
+   def user_for(request):
+       user = my_sessions.get(request.cookies.get("sid"))
+       if user is None:
+           raise HTTPException(status_code=401)
+       return user
+   ```
+   Without `user_for` the server runs open and logs a warning.
+3. **Restrict CORS**: `MANGO_CORS_ORIGINS=https://app.example.com,https://admin.example.com` (comma-separated). The default `*` disables credentials, as the CORS spec requires.
+4. **Scope the collections** the agent may see and query, including through `$lookup`/`$unionWith`:
+   ```python
+   db = MongoRunner(allowed_collections=["orders", "products"])   # or denied_collections=[...]
+   ```
+   `system.*` collections are always hidden.
+5. **Remember what reaches the LLM provider**: sampled documents, field values and query results are sent to the model. Point Mango at a database whose data you are allowed to share with that provider, or scope the collections as above.
+6. Put a reverse proxy with TLS and rate limiting in front of the server; the app caps question length and import size but does not rate-limit by itself.
+
+### Access control per user: middlewares
+
+Mango does not know what a user or a role is — **your app authenticates, Mango enforces.** Pass your own user object to `ask()`; middlewares read it and decide, at fixed interception points, what that caller may see and do. Role logic stays entirely in your code:
+
+```python
+from mango.middleware import CollectionAccess, RowFilter, RedactFields, DenyTools, Budget, AuditLog
+
+ROLE_COLLECTIONS = {"analyst": ["orders", "products"], "finance": ["orders", "invoices"], "admin": "*"}
+
+agent.use(CollectionAccess(lambda user: ROLE_COLLECTIONS[user.role]))
+agent.use(RowFilter("orders", lambda user: {} if user.role == "admin" else {"region": user.region}))
+agent.use(RedactFields(lambda user: [] if user.role == "admin" else ["customers.email", "customers.phone"]))
+agent.use(DenyTools(lambda user: [] if user.role == "admin" else ["save_text_memory"]))
+agent.use(Budget(max_turns_per_day=200))
+agent.use(AuditLog())          # one JSON line per query / denial / turn on the `mango.audit` logger
+
+answer = await agent.ask(question, user=current_user)
+```
+
+| Middleware | Guarantees |
+|---|---|
+| `CollectionAccess` | Hidden collections are invisible everywhere: listing, schema in the prompt, value hints, memory examples, and every query — including `$lookup`/`$unionWith` targets, enforced inside the runner. |
+| `RowFilter` | A mandatory filter per collection ("only your region"): AND-ed into `find`/`count`/`distinct`, prepended as `$match` to pipelines, pushed into `$lookup`/`$unionWith` on that collection (`localField`/`foreignField` lookups are rewritten to the pipeline form; `$graphLookup` is denied). |
+| `RedactFields` | Hidden fields never reach the LLM: queries referencing them are denied, `inspect_field` is denied, and any value that still shows up (rows, sample documents, schema sample values) is replaced with `[REDACTED]`. |
+| `DenyTools` | The tool is removed from the list offered to the LLM *and* refused if called. |
+| `Budget` | Per-user daily caps on turns and executed queries (process-local counters). |
+| `AuditLog` | Who ran what: `query`, `denied` and `turn` events with user, session, turn id, collection, query, row count, tokens. |
+
+A blocked call becomes a tool error the LLM relays ("this data is not available to you") — it does not retry or work around it. Anything custom is a function on one of the hooks:
+
+```python
+@agent.before_query
+def interns_cannot_see_salaries(ctx, query):
+    if ctx.user.role == "intern" and query.collection == "salaries":
+        raise AccessDenied("salaries are not available to interns")
+    return query
+```
+
+Hooks: `before_turn`, `filter_tools`, `before_tool`, `before_query`, `after_query`, `after_tool`, `before_answer`, `after_turn`, plus `filter_schema` / `collection_policy` for class-based middlewares (`mango.middleware.Middleware`).
+
+**Mounting into your FastAPI app** — `user_for` is the only contact point with your authentication:
+
+```python
+from mango.servers.fastapi import mango_router
+
+app.include_router(
+    mango_router(agent, user_for=lambda request: request.state.user),
+    prefix="/mango",
+)
+```
+
+Sessions are bound to the user that created them, and the memory endpoints are gated through the same `before_tool` hooks under the pseudo tool names `memory_train`, `memory_import`, `memory_export`. The standalone `MangoFastAPIServer(agent, user_for=...)` accepts the same callback.
 
 > **MQL validation.** Every `run_mql` call is validated before hitting the database — collection names, field names, and operators are checked against the live schema. Errors come back with hints (`did you mean 'order_total'?`) so the LLM can self-correct.
 

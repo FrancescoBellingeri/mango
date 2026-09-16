@@ -13,6 +13,8 @@ Checks performed:
   3. Required arguments per operation (pipeline for aggregate, etc.)
   4. Pipeline stage names are valid MQL aggregation stages
   5. $ operators in filter / pipeline are recognised MQL operators
+  6. Forbidden (write / JS / admin) operators absent from filter, pipeline,
+     projection and sort — at any depth
 """
 
 from __future__ import annotations
@@ -21,7 +23,11 @@ import difflib
 from dataclasses import dataclass, field
 from typing import Any
 
-from mango.core.security import find_forbidden_operators
+from mango.core.security import (
+    ALLOWED_STAGES,
+    find_disallowed_stages,
+    find_forbidden_operators,
+)
 from mango.core.types import QueryRequest
 from mango.nosql_runner import NoSQLRunner
 
@@ -54,16 +60,8 @@ _FILTER_OPERATORS = frozenset({
     "$comment", "$rand",
 })
 
-# Aggregation pipeline stage operators
-_PIPELINE_STAGES = frozenset({
-    "$addFields", "$bucket", "$bucketAuto", "$changeStream", "$collStats",
-    "$count", "$densify", "$documents", "$facet", "$fill", "$geoNear",
-    "$graphLookup", "$group", "$indexStats", "$limit", "$listLocalSessions",
-    "$listSessions", "$lookup", "$match", "$merge", "$out", "$planCacheStats",
-    "$project", "$redact", "$replaceRoot", "$replaceWith", "$sample",
-    "$search", "$searchMeta", "$set", "$setWindowFields", "$skip", "$sort",
-    "$sortByCount", "$unionWith", "$unset", "$unwind", "$vectorSearch",
-})
+# Aggregation pipeline stages — shared allowlist (see mango.core.security).
+_PIPELINE_STAGES = ALLOWED_STAGES
 
 # Accumulator operators (used in $group, $bucket, $setWindowFields, etc.)
 _ACCUMULATOR_OPERATORS = frozenset({
@@ -201,7 +199,9 @@ class MQLValidator:
         inspect pipeline stages, so a stage like $out or an operator like
         $where would otherwise slip through. This closes that gap.
         """
-        forbidden = find_forbidden_operators(request.filter, request.pipeline)
+        forbidden = find_forbidden_operators(
+            request.filter, request.pipeline, request.projection, request.sort
+        )
         if forbidden:
             errors.append(
                 "Forbidden operator(s) "
@@ -263,6 +263,14 @@ class MQLValidator:
                 errors.append(
                     f"Unknown aggregation stage '{stage_op}' at pipeline index {i}.{hint}"
                 )
+        # Nested sub-pipelines ($lookup / $unionWith / $facet) must obey the
+        # same allowlist; the loop above only sees top-level stages.
+        top_level = {next(iter(st)) for st in request.pipeline if isinstance(st, dict) and len(st) == 1}
+        nested = [op for op in find_disallowed_stages(request.pipeline) if op not in top_level]
+        if nested:
+            errors.append(
+                f"Unknown or disallowed stage(s) {nested} inside a nested sub-pipeline."
+            )
 
     def _check_operators(
         self, request: QueryRequest, warnings: list[str]
